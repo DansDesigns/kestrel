@@ -1,0 +1,5 @@
+# Kestrel dependencies
+PySide6>=6.6            # Qt 6 interface (LGPL)
+requests>=2.31          # llama.cpp HTTP API
+PyYAML>=6.0             # SKILL.md frontmatter (a fallback parser ships in-tree)
+psutil>=5.9             # system monitor: CPU, memory, swap (falls back without it)
