@@ -241,6 +241,20 @@ to spare the generation, are skipped; the tools remain available in both cases.
 Steps carry four states — pending, in progress, done, blocked — and a blocked step
 may carry a short note recording why.
 
+**The checklist decides when the turn is over.** A model that answers the first
+step and stops — "I have read the spec, let me know if you want me to continue" —
+has not finished the task, it has narrated one step of it. While steps remain
+open, a prose reply is treated as a status update: the plan state is put back to
+the model and the work carries on. `finish` is refused twice while steps are
+still open, with the count of what remains, so ending the turn is a decision
+rather than a slip.
+
+Three guards keep that from becoming a monologue: three prose replies in a row
+end it, a genuine question ends it (one that actually ends in a question mark and
+asks for a decision, not "let me know if you want me to continue"), and the step
+limit ends it regardless. Every tool result carries a one-line plan status, so
+the model is never more than one message from knowing where it is.
+
 **Drift correction.** Models reliably begin a task by maintaining the checklist
 and then quietly stop. After three steps without a change, a single-line reminder
 is appended to the next tool result. It costs about a dozen tokens and arrives at
@@ -249,6 +263,17 @@ the point of action, which is where it is most likely to be acted upon.
 **Overflow.** When a plan grows beyond its allowance, the rendering keeps the
 current step and its immediate neighbours and summarises the remainder by count.
 A twelve-step plan renders in 76 tokens.
+
+**Steps are editable in place.** Double-click one, or select it and press F2. A
+plan is a working document, and correcting a word in it should not mean retyping
+it through a dialog.
+
+**A plan you wrote is instructions, not a suggestion.** The model is told
+explicitly that an existing checklist may have been written by hand, to work
+through it in order rather than replace it, and to mark steps done only with
+evidence. Each turn opens with a line naming the step to start from. Verified:
+a three-step plan typed in by hand survived a turn intact, was followed in
+order, and the model's own alternative plan was never substituted.
 
 **Writing a plan yourself.** *Add step…* takes one step per line. A model that
 will not decompose a task — small ones often will not — should not leave the
@@ -456,6 +481,39 @@ Both live under the Projects tab.
 
 ---
 
+## 8b. Downloading models
+
+Downloading is not something to watch: a 40 GB file runs for an hour while the
+application is used for something else. It therefore has its own window, opened
+from **Downloads** in the top bar, and the transfers belong to the application
+rather than to the window — closing it stops nothing, and reopening shows them
+still running.
+
+Searching filters on Hugging Face's `gguf` tag first and, when that returns
+nothing, repeats the search without it — a repository holding GGUF files is not
+always tagged as one. A failure is shown in the results list rather than only in
+the status line, with the HTTP code and a note on the likely cause, and a **Test**
+button reports what the network actually does instead of leaving an empty list to
+be interpreted.
+
+The window has a second tab listing the models already on disk, with their sizes
+and a running total — downloading without seeing what you already have is how a
+20 GB file gets fetched twice. Models can be deleted from there as well as from
+the Models panel.
+
+Several run at once, two by default and up to four. Each can be **paused and
+resumed**: pausing keeps the bytes already on disk in a `.part` file, and
+resuming asks the server for the rest with a range request. Cancelling is the
+only thing that discards them. A transfer interrupted by a closed laptop or a
+dropped connection resumes the same way, because the partial file *is* the
+state.
+
+Verified against a server that honours ranges: paused at 1,048,576 of 6,000,000
+bytes, resumed with a request for exactly that offset, and the finished file was
+byte-identical to the original.
+
+---
+
 ## 9. Skills
 
 Kestrel implements the open [agentskills.io](https://agentskills.io/specification)
@@ -566,9 +624,22 @@ context:
 | 16 GB | `-ngl 29` |
 | 24 GB | `-ngl 44` |
 
-The Models tab shows the split for the selected model before loading it. Setting
-the value explicitly overrides this: 0 for CPU only, 999 for everything on the
-GPU.
+**Params → Runtime** has a slider for it. The bar shows what each side holds in
+gigabytes as the handle moves — graphics memory on the left, system RAM on the
+right — with a dashed mark at the point the device runs out, since crossing that
+is what turns a slow load into a failed one. On integrated graphics both sides
+are the same physical memory, and the caption says so.
+
+Integrated adapters report a token amount as dedicated memory — a UHD 620 says
+1 GB while Windows shares 15.9 GB of system RAM with it — so both figures are
+shown wherever GPU memory appears, and the larger one is what sizes the offload.
+Where a driver reports something implausible, **GPU memory budget** overrides it
+outright.
+
+Auto sets the largest split that fits; the number can also be typed. 0 is CPU
+only. There is no requirement to fit the model on the GPU: whatever is not
+offloaded runs from system RAM, which is how a 15 GB model runs on a machine
+with a 2 GB adapter.
 
 ### 10.4 Sampling parameters
 
@@ -699,6 +770,15 @@ players only when neither is available. The same applies to streaming: with no
 external player, Piper's raw output is fed straight to the sound card rather
 than the feature being unavailable.
 
+**One warm process per session.** Loading the voice model is most of the cost of
+a short utterance — seconds to load, a fraction of a second to speak. Piper is
+therefore started once and kept for the session rather than per reply. Measured
+against a 1.5 s model load: first utterance 1.62 s, every one after it 0.12 s.
+Changing voice or speed starts a new process, because it must.
+
+Voice quality is the other half: a `low` voice synthesises several times faster
+than a `medium` one and starts quicker, which matters most on a laptop.
+
 **One warm process per reply.** Per-call startup dominates short utterances —
 about 0.25 s of process spawn and model load against 0.2 s of actual synthesis.
 Piper is therefore started once for the turn with `--output-raw` piped straight
@@ -769,7 +849,9 @@ had. The whole strip is the target rather than a small button, and the chevron
 points the way the panel will move.
 
 **Scaling.** A panel cannot be dragged narrower than its contents need. The
-floor is measured from the widest page opened so far rather than fixed, since a
+floor is re-measured when a page is first built — panels are created on demand,
+and measuring before that finds an empty widget — and taken from the widest page
+opened so far rather than fixed, since a
 tab holding a wide form needs more than one holding a list — and it is applied
 while dragging rather than as a widget minimum, which would stop the panel
 collapsing to its rail. Panel contents stretch to whatever width they are given. Table
@@ -833,8 +915,11 @@ opening the application means scanning model directories, reading skill folders
 and probing speech engines — some of which shell out to other programs.
 
 **Top bar.** Present on every page, above the tab stack rather than inside it:
-the wordmark, a status line, the speech-output toggle, dictation, and the
-light/dark switch.
+the wordmark, a status line, and the actions that belong to the session as a
+whole — new conversation, settings, downloads, and the light/dark switch.
+
+**Composer row.** The controls that act on the message being written sit with
+it: following, continue, speak, dictate, stop and send.
 
 **Where settings live.** Two places, split by what they configure. **Settings**
 (top bar) holds the application: appearance, agent behaviour, endpoint and
@@ -855,9 +940,21 @@ user messages too. Fork branches a new conversation containing everything up to 
 reply, switches to it, and leaves the original saved — trying another direction
 should not cost the one that got you there.
 
+**The backend dies with Kestrel.** Asking a child process to stop only works if
+Kestrel gets the chance to ask, and a crash or a kill from Task Manager does
+not. On Windows llama.cpp is started inside a job object marked kill-on-close,
+so the operating system enforces it however Kestrel ends. A clean exit also
+stops it explicitly, from the close event, `aboutToQuit` and `atexit` alike.
+
 **Closing the window stops the server.** A backend Kestrel started belongs to
 Kestrel; leaving it running holds the port and the model's memory after the
 window has gone. One adopted from elsewhere is left alone.
+
+**Continue** picks the task back up: the open step if the checklist has one,
+otherwise from wherever the reply stopped. A turn can end with work outstanding —
+stopped by hand, cut short by the step limit, or a reply that trailed away — and
+retyping the request loses the thread. The button carries a mark when the
+checklist still has open steps.
 
 **Stop stops the speech too.** A cancelled reply should not carry on being read
 out, so the queue is dropped and whatever is making noise is killed rather than
@@ -876,7 +973,8 @@ holds its own.
 
 **Collapsing.** Clicking the active tab icon collapses that panel to its icon
 rail; clicking any icon reopens it at that tab. The rail is the control, so
-there are no separate handles to find.
+there are no separate handles to find — and the splitter holds three panes and
+therefore exactly two drag handles, one per side.
 
 **Left column.** Status readouts; the model browser, downloader and runtime
 parameters; sampling and reasoning controls; the cluster; installed skills; the
@@ -889,12 +987,24 @@ time shows the time — not the instructions it read, the command it ran, or the
 exit status. Everything is kept in full in the Activity tab, and *Show tool
 arguments and raw output* on the Status tab puts it back inline.
 
+**Tools** lists everything the model can call this session, with what each one
+reaches — read, writes, or runs commands — and its full signature and
+parameters. The system prompt tells the model; this tells you.
+
+**A chime marks the end of a task**, since a long one is worth walking away from
+and a finished run looks much like a stalled one at a glance. It can be switched
+off in Settings → Agent.
+
 **Right column.** A matching icon rail: the live task checklist; an activity tree
 recording every tool call with its complete untruncated output; the
 `llama-server` log; and a system monitor showing CPU, memory and GPU. The monitor
 samples only while it is on screen — polling a vendor GPU tool spawns a process
 every couple of seconds, which is not worth doing for a panel nobody is looking
-at. psutil is installed by default; without it the same figures come from `/proc` on
+at. Reading GPU counters spawns a process, so the first sample takes a second or
+two. Until it lands the monitor says it is looking rather than that there is
+nothing — reporting no GPU while still checking is simply wrong.
+
+psutil is installed by default; without it the same figures come from `/proc` on
 Linux and the Win32 API on Windows.
 
 GPU readings come from `nvidia-smi` or `rocm-smi` where those exist. They do not
@@ -1081,9 +1191,15 @@ authoritative answer rather than the health probe:
   released; terminating is a request, not an outcome, and a server mid-load can
   take seconds to notice.
 - **Port free** — start, wait for health, connect.
-- **Port held and answering** — offer to use that server as it is. A model cannot
-  be loaded into a server Kestrel did not start, so this is presented as a
-  choice rather than done silently.
+- **Port held** — Kestrel names the process holding it and offers three ways
+  out: stop it and start fresh, connect to it as it is, or move to a different
+  port. Every route to a busy port ends at the same dialog, whether it came from
+  loading a model, starting the backend, or a failure reported by llama.cpp
+  itself. **Restart server** on the Status tab does the same thing without
+  waiting for an error. Most often this
+  is a llama-server left behind by a previous run: a stranded process that keeps
+  answering is otherwise a dead end, since a model cannot be loaded into a server
+  Kestrel did not start.
 - **Port held and not answering** — refuse, and say what to stop or which port to
   change.
 - **Process exits during startup** — report the exit code and the last lines of
@@ -1151,6 +1267,7 @@ fully editable from the interface. The principal sections:
 | `skills_dirs`, `persona_dirs`, `model_dirs` | Search paths |
 | `tool_dialect`, `profile_override` | Dialect and profile selection (§3, §4) |
 | `approval` | `always`, `safe` (writes and shell only), or `never` |
+| `plan_driven`, `bell_on_finish` | Keep working until the checklist closes; chime when it does (Settings → Agent) |
 
 ### Tools
 

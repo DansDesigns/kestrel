@@ -20,14 +20,12 @@ VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 def local_version() -> str:
-    """From version.txt beside the package, falling back to the module."""
-    candidate = Path(__file__).resolve().parent.parent / "version.txt"
-    try:
-        text = candidate.read_text("utf-8").strip().splitlines()[0].strip()
-        if text:
-            return text
-    except (OSError, IndexError):
-        pass
+    """The installed version, from the package and nowhere else.
+
+    Kestrel does not ship a version.txt of its own: the file this compares
+    against is yours, in your repository, and writing one here would overwrite
+    the number you set every time the package is updated.
+    """
     from . import __version__
     return __version__
 

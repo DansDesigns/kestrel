@@ -119,6 +119,14 @@ class SettingsDialog(QDialog):
         self.watch_skills = QCheckBox("Pick up new skills automatically")
         self.watch_skills.setChecked(c.watch_skills)
         lay.addWidget(self.watch_skills)
+        self.plan_driven = QCheckBox("Keep working until the checklist is closed")
+        self.plan_driven.setToolTip("A prose reply with steps still open is "
+                                    "treated as a status update, not an answer")
+        self.plan_driven.setChecked(c.plan_driven)
+        lay.addWidget(self.plan_driven)
+        self.bell = QCheckBox("Chime when a task finishes")
+        self.bell.setChecked(c.bell_on_finish)
+        lay.addWidget(self.bell)
 
         apply_btn = QPushButton("Apply")
         apply_btn.setObjectName("Primary")
@@ -145,6 +153,8 @@ class SettingsDialog(QDialog):
         c.auto_start_server = self.autostart.isChecked()
         c.show_tool_detail = self.tool_detail.isChecked()
         c.watch_skills = self.watch_skills.isChecked()
+        c.plan_driven = self.plan_driven.isChecked()
+        c.bell_on_finish = self.bell.isChecked()
         c.save()
         self._note("Agent settings saved")
 

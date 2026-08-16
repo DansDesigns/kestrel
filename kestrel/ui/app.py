@@ -1,6 +1,7 @@
 """The Kestrel window."""
 from __future__ import annotations
 
+import atexit
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import cluster as clustermod
+from .. import downloads as dlmod
 from .. import sessions as sessionmod
 from .. import speech as speechmod
 from .. import skills as skillmod
@@ -30,13 +32,14 @@ from ..llm import LlamaClient, LLMError
 from . import theme
 from .panels import (BackendPanel, MemoryPanel, ModelsPanel, ParamsPanel,
                      PersonaPanel, PlanPanel, ProjectsPanel, SpeechPanel,
-                     SystemPanel, UiThread)
+                     SystemPanel, ToolsPanel, UiThread, _row)
+from .downloads_window import DownloadsWindow
 from .settings import SettingsDialog
 from .splash import Splash
 from .widgets import (ActivityTree, ChatView, ContextGauge,
                       BusyOverlay, Field, IconTabBar, LazyTab, Readout,
-                      TypingIndicator, clear_font_cache, mono_font,
-                      stretch_columns)
+                      TypingIndicator, clear_font_cache, install_wheel_guard,
+                      mono_font, stretch_columns)
 
 
 # ------------------------------------------------------------------ worker --
@@ -608,6 +611,7 @@ class MainWindow(QWidget):
     dictated = Signal(str, bool)
     probeFinished = Signal(str, bool, bool)
     backendLocated = Signal(str)
+    takeoverDone = Signal(str, bool, str)
 
     def __init__(self, cfg: Config, progress=None):
         super().__init__()
@@ -619,6 +623,10 @@ class MainWindow(QWidget):
         self.speaker.on_error = lambda msg: self.statusReady.emit(f"Speech: {msg}")
         self.dictation = None
         self._partial_len = 0
+        self._ngl_retries = 0
+        self._loading_path = ""
+        self.downloads = None
+        self.downloads_window = None
         self._replies: dict[int, dict] = {}
         self._reply_no = 0
         self._pending_prompt = ""
@@ -626,7 +634,8 @@ class MainWindow(QWidget):
         # Populated as their tabs are first shown.
         self.models_panel = self.params_panel = self.skills_panel = None
         self.memory_panel = self.persona_panel = self.speech_panel = None
-        self.backend_panel = self.system_panel = None
+        self.backend_panel = self.system_panel = self.tools_panel = None
+        self._tool_list: list[dict] = []
         self._gen_start = None
         self._gen_last = 0.0
         self._gen_tokens = 0
@@ -672,6 +681,7 @@ class MainWindow(QWidget):
             (self.dictated, self.on_dictated),
             (self.probeFinished, self._continue_load),
             (self.backendLocated, self._backend_located),
+            (self.takeoverDone, self._takeover_done),
         ):
             signal.connect(slot)
 
@@ -699,7 +709,8 @@ class MainWindow(QWidget):
         # and elided text ("S...", "M...") named nothing. Icons plus tooltips
         # stay legible at any width.
         self._icon_tabs = ["status", "projects", "models", "params", "cluster",
-                           "skills", "memory", "persona", "speech", "backend"]
+                           "tools", "skills", "memory", "persona", "speech",
+                           "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -727,6 +738,7 @@ class MainWindow(QWidget):
         self.cluster.logLine.connect(self.busy_overlay.update_detail)
         left.addTab(self.cluster, "Cluster")
 
+        left.addTab(self._lazy(ToolsPanel, self._wire_tools), "Tools")
         left.addTab(self._lazy(lambda: SkillsPanel(self.cfg), self._wire_skills),
                     "Skills")
         left.addTab(self._lazy(lambda: MemoryPanel(self.cfg), self._wire_memory),
@@ -750,10 +762,6 @@ class MainWindow(QWidget):
         self._label_tabs(left)
         self.left_panel = left
         splitter.addWidget(left)
-
-        self.left_spacer = QWidget()
-        self.left_spacer.setFixedWidth(1)
-        splitter.addWidget(self.left_spacer)
 
         # centre: transcript and composer
         centre = QWidget()
@@ -794,7 +802,32 @@ class MainWindow(QWidget):
         self.chat.followChanged.connect(self._follow_changed)
         self.chat.actionRequested.connect(self.on_reply_action)
         row.addWidget(self.follow_btn)
+
+        self.continue_btn = QPushButton("Continue")
+        self.continue_btn.setObjectName("Chip")
+        self.continue_btn.setToolTip("Pick the task back up from where it stopped")
+        self.continue_btn.clicked.connect(self.continue_task)
+        row.addWidget(self.continue_btn)
+
         row.addStretch(1)
+
+        # Speaking and dictating belong to the message being written, not to the
+        # window, so they sit with the other controls that act on it.
+        self.speak_btn = QPushButton("Speak")
+        self.speak_btn.setObjectName("Chip")
+        self.speak_btn.setCheckable(True)
+        self.speak_btn.setChecked(self.cfg.speech.tts_enabled)
+        self.speak_btn.setToolTip("Read replies aloud")
+        self.speak_btn.toggled.connect(self._toggle_tts)
+        row.addWidget(self.speak_btn)
+
+        self.mic_btn = QPushButton("Dictate")
+        self.mic_btn.setObjectName("Chip")
+        self.mic_btn.setToolTip("Dictate into the composer. Words appear as they "
+                                "are recognised; press again to stop.")
+        self.mic_btn.clicked.connect(self.dictate)
+        row.addWidget(self.mic_btn)
+
         row.addWidget(self.stop_btn)
         row.addWidget(self.send_btn)
         clay.addLayout(row)
@@ -815,17 +848,15 @@ class MainWindow(QWidget):
         self._label_tabs(right, self._right_tabs)
         self.right_panel = right
 
-        self.right_spacer = QWidget()
-        self.right_spacer.setFixedWidth(1)
-        splitter.addWidget(self.right_spacer)
         splitter.addWidget(right)
 
-        for index, stretch in ((0, 0), (1, 0), (2, 1), (3, 0), (4, 0)):
+        # Left, centre, right — and therefore exactly two handles. The 1px
+        # spacers that used to sit between them gave the splitter five children
+        # and four handles, which is why each side appeared to have two bars.
+        for index, stretch in ((0, 0), (1, 1), (2, 0)):
             splitter.setStretchFactor(index, stretch)
-        splitter.setCollapsible(1, False)
-        splitter.setCollapsible(3, False)
         splitter.setChildrenCollapsible(True)
-        splitter.setSizes([340, 1, 620, 1, 300])
+        splitter.setSizes([340, 620, 300])
         self.splitter = splitter
         self._panel_widths = {"left": 360, "right": 300}
         self._collapsed = {"left": False, "right": False}
@@ -880,20 +911,11 @@ class MainWindow(QWidget):
         settings_btn.clicked.connect(self.open_settings)
         lay.addWidget(settings_btn)
 
-        self.speak_btn = QPushButton("Speak")
-        self.speak_btn.setObjectName("Chip")
-        self.speak_btn.setCheckable(True)
-        self.speak_btn.setChecked(self.cfg.speech.tts_enabled)
-        self.speak_btn.setToolTip("Read replies aloud")
-        self.speak_btn.toggled.connect(self._toggle_tts)
-        lay.addWidget(self.speak_btn)
-
-        self.mic_btn = QPushButton("Dictate")
-        self.mic_btn.setObjectName("Chip")
-        self.mic_btn.setToolTip("Dictate into the composer. Words appear as they "
-                                "are recognised; press again to stop.")
-        self.mic_btn.clicked.connect(self.dictate)
-        lay.addWidget(self.mic_btn)
+        self.downloads_btn = QPushButton("Downloads")
+        self.downloads_btn.setObjectName("Chip")
+        self.downloads_btn.setToolTip("Search and download models in the background")
+        self.downloads_btn.clicked.connect(self.open_downloads)
+        lay.addWidget(self.downloads_btn)
 
         self.theme_btn = QPushButton()
         self.theme_btn.setObjectName("Chip")
@@ -1150,6 +1172,11 @@ class MainWindow(QWidget):
     def _lazy(self, factory, on_ready):
         tab = LazyTab(factory)
         tab.built.connect(on_ready)
+        # The tab is built during its show event, which is after currentChanged
+        # has already fired — so measuring the page then finds it empty and the
+        # panel keeps whatever minimum the previous tab had. Re-clamp once the
+        # contents actually exist.
+        tab.built.connect(lambda _p: self._clamp_panels())
         return tab
 
     def _wire_models(self, p) -> None:
@@ -1163,6 +1190,10 @@ class MainWindow(QWidget):
         self.params_panel = p
         p.statusLine.connect(self._status)
         p.appearanceChanged.connect(self.apply_appearance)
+
+    def _wire_tools(self, p) -> None:
+        self.tools_panel = p
+        p.update_tools(self._tool_list)
 
     def _wire_skills(self, p) -> None:
         self.skills_panel = p
@@ -1206,7 +1237,8 @@ class MainWindow(QWidget):
         """Remember the width on the way out so restoring returns it to where
         the user had it, rather than to a default."""
         sizes = self.splitter.sizes()
-        index = 0 if key == "left" else 4
+        index = 0 if key == "left" else 2
+        centre = 1
         rail = self._rail_width(panel)
         if not visible:
             if sizes[index] > rail + 20:
@@ -1214,7 +1246,7 @@ class MainWindow(QWidget):
             # Collapse to exactly the icon rail: the tabs stay reachable, and
             # the pane border is dropped so no empty sliver shows beside them.
             self._set_collapsed_style(panel, True)
-            sizes[2] += sizes[index] - rail
+            sizes[centre] += sizes[index] - rail
             sizes[index] = rail
         else:
             self._set_collapsed_style(panel, False)
@@ -1222,13 +1254,13 @@ class MainWindow(QWidget):
             # has the most room to give.
             floor = self._content_min(panel)
             wanted = max(floor, self._panel_widths.get(key, 340))
-            restored = min(wanted, max(floor, sizes[2] - 240))
+            restored = min(wanted, max(floor, sizes[centre] - 240))
             sizes[index] = restored
-            sizes[2] = max(240, sizes[2] - (restored - rail))
+            sizes[centre] = max(240, sizes[centre] - (restored - rail))
         self.splitter.setSizes(sizes)
         self._collapsed[key] = not visible
 
-    def _content_min(self, panel) -> int:
+    def _content_min(self, panel) -> int:  # noqa: C901
         """The narrowest this panel can be drawn without cutting anything off.
 
         Measured from the page rather than assumed: a widget minimum would stop
@@ -1245,10 +1277,17 @@ class MainWindow(QWidget):
             elif page.findChild(QScrollArea) is not None:
                 area = page.findChild(QScrollArea)
                 inner = area.widget() or area
-            needed = inner.sizeHint().width() + self._rail_width(panel) + 26
+            # Whichever is larger: a preferred size can be smaller than the
+            # width the contents actually refuse to go below, and it is the
+            # latter that decides whether a row overflows.
+            needed = max(inner.sizeHint().width(),
+                         inner.minimumSizeHint().width()) \
+                + self._rail_width(panel) + 26
         key = id(panel)
         remembered = self._content_mins.get(key, PANEL_MIN_WIDTH)
-        needed = max(PANEL_MIN_WIDTH, min(520, needed), remembered)
+        # Capped, but generously: the cap exists to stop one runaway widget
+        # dictating the layout, not to clip a page that genuinely needs room.
+        needed = max(PANEL_MIN_WIDTH, min(620, needed), remembered)
         self._content_mins[key] = needed
         return needed
 
@@ -1257,14 +1296,14 @@ class MainWindow(QWidget):
         sizes = self.splitter.sizes()
         changed = False
         for key, index, panel in (("left", 0, self.left_panel),
-                                  ("right", 4, self.right_panel)):
+                                  ("right", 2, self.right_panel)):
             if self._collapsed.get(key):
                 continue
             floor = self._content_min(panel)
-            if 0 < sizes[index] < floor and sizes[2] > 200:
-                give = min(floor - sizes[index], sizes[2] - 200)
+            if 0 < sizes[index] < floor and sizes[1] > 200:
+                give = min(floor - sizes[index], sizes[1] - 200)
                 sizes[index] += give
-                sizes[2] -= give
+                sizes[1] -= give
                 changed = True
         if changed:
             self.splitter.setSizes(sizes)
@@ -1319,7 +1358,12 @@ class MainWindow(QWidget):
 
         self.reconnect_btn = QPushButton("Reconnect")
         self.reconnect_btn.clicked.connect(self.reconnect)
-        lay.addWidget(self.reconnect_btn)
+        self.restart_btn = QPushButton("Restart server")
+        self.restart_btn.setToolTip("Stop whatever holds the port and start "
+                                    "again, reloading the current model if "
+                                    "one was loaded")
+        self.restart_btn.clicked.connect(self.restart_server)
+        lay.addWidget(_row(self.reconnect_btn, self.restart_btn))
 
         self.detail_box = QCheckBox("Show tool arguments and raw output")
         self.detail_box.setChecked(self.cfg.show_tool_detail)
@@ -1339,8 +1383,7 @@ class MainWindow(QWidget):
         self.status_msg.setObjectName("Dim")
         lay.addWidget(self.status_msg)
 
-        note = QLabel("Kestrel sizes its prompt to whatever context the server actually "
-                      "loaded. There is no minimum to meet — it will run in 4k.")
+        note = QLabel("The prompt is sized to whatever context the server loaded.")
         note.setWordWrap(True)
         note.setObjectName("Dim")
         lay.addWidget(note)
@@ -1412,6 +1455,8 @@ class MainWindow(QWidget):
         self.r_dialect.set(info["dialect"])
         self.r_tools.set(str(info["tools"]))
         self.r_skills.set(str(info["skills"]))
+        self._tool_list = info.get("tool_list") or []
+        self._with("tools_panel", lambda p: p.update_tools(self._tool_list))
         self.r_persona.set(info.get("persona") or "none")
         self.r_think.set(info.get("thinking", "off"))
         self.r_memories.set(str(info.get("memories", 0)))
@@ -1593,27 +1638,16 @@ class MainWindow(QWidget):
             return
 
         if taken and not server.running:
+            # Every route to a busy port ends at the same dialog, which always
+            # offers to stop what is there — a choice between "use it" and
+            # "give up" is not a choice worth presenting.
             self.busy_overlay.end()
-            if alive:
-                answer = QMessageBox.question(
-                    self, "A server is already running",
-                    f"Something is already serving on {url}.\n\n"
-                    "Kestrel cannot load a model into a server it did not start. "
-                    "Connect to the existing server as it is?\n\n"
-                    "Choose No to cancel — stop that server, or change the port "
-                    "under Models \u2192 Runtime, then load again.")
-                if answer == QMessageBox.Yes:
-                    self.cfg.server_url = url
-                    self._status(f"Using the server already running on {url}")
-                    self.requestPrepare.emit()
-                return
-            QMessageBox.warning(
-                self, "Port in use",
-                f"Port {self.cfg.runtime.port} is taken, but nothing is answering "
-                "there.\n\nStop whatever holds it, or change the port under "
-                "Models \u2192 Runtime.")
+            self.port_conflict(path, alive)
             return
 
+        if not getattr(self, "_loading_path", "") == path:
+            self._ngl_retries = 0        # a different model starts fresh
+            self._loading_path = path
         self.cluster.stop_server()
         self._status(f"Loading {Path(path).name}…")
         self.chat.add_note(f"Loading {Path(path).name}…")
@@ -1625,7 +1659,10 @@ class MainWindow(QWidget):
             spawned = server.start(self.cfg)
         except Exception as e:
             self.busy_overlay.end()
-            QMessageBox.warning(self, "Cannot start llama-server", str(e))
+            if clustermod.is_port_problem(str(e)):
+                self.port_conflict(path)
+            else:
+                QMessageBox.warning(self, "Cannot start llama-server", str(e))
             self._status(str(e))
             return
         self.cluster.start_btn.setEnabled(False)
@@ -1637,6 +1674,7 @@ class MainWindow(QWidget):
             # probe: a foreign server on the same port would answer for it.
             if ok and (server.adopted or server.running):
                 self.cfg.server_url = url
+                self._ngl_retries = 0
                 self.statusReady.emit(f"Loaded {Path(path).name}")
                 self.requestPrepare.emit()
             else:
@@ -1646,7 +1684,18 @@ class MainWindow(QWidget):
 
     @Slot(str)
     def on_server_failed(self, summary: str) -> None:
+        # An offload that will not fit is worth retrying with less of it before
+        # reporting anything: the alternative is a model that simply refuses to
+        # load on hardware that can run it.
+        if self._retry_with_less_gpu(summary):
+            return
         self.busy_overlay.end()
+        if clustermod.is_port_problem(summary):
+            self.cluster.start_btn.setEnabled(True)
+            self.cluster.stop_btn.setEnabled(False)
+            self.chat.add_error("llama-server did not start.\n" + summary)
+            self.port_conflict(self.cfg.model_path)
+            return
         self.cluster.start_btn.setEnabled(True)
         self.cluster.stop_btn.setEnabled(False)
         self._status("llama-server did not start")
@@ -1697,6 +1746,27 @@ class MainWindow(QWidget):
         self._status("Checking for a running server")
         self.maybe_autostart()
 
+    def _retry_with_less_gpu(self, summary: str) -> bool:
+        """Halve the GPU offload and try again, down to running on the CPU."""
+        server = self.cluster.server
+        attempted = getattr(server, "attempted_ngl", -1)
+        if attempted <= 0 or self._ngl_retries >= 3:
+            return False
+        if not clustermod.looks_like_oom(summary):
+            return False
+        nxt = 0 if attempted <= 4 else attempted // 2
+        self._ngl_retries += 1
+        self.cfg.runtime.n_gpu_layers = nxt
+        self.cfg.save()
+        where = (f"{nxt} layers on the GPU" if nxt else "everything on the CPU")
+        self.chat.add_note(
+            f"That did not fit in graphics memory. Retrying with {where}.",
+            theme.AMBER)
+        self._status(f"Retrying with -ngl {nxt}")
+        self.busy_overlay.update_detail(f"retrying with {where}")
+        QTimer.singleShot(200, lambda: self.load_model(self.cfg.model_path))
+        return True
+
     def maybe_autostart(self) -> None:
         """Start the backend if nothing is serving yet.
 
@@ -1713,6 +1783,104 @@ class MainWindow(QWidget):
             self.probeFinished.emit("", alive, False)
 
         threading.Thread(target=probe, daemon=True).start()
+
+    def restart_server(self) -> None:
+        """Stop the backend — ours or a stranger's — and start it again."""
+        host, port = self.cfg.runtime.host, self.cfg.runtime.port
+        model = self.cfg.model_path if self.cluster.server.running else ""
+        self.busy_overlay.begin("Restarting llama-server", f"{host}:{port}")
+
+        def work():
+            self.cluster.server.stop()
+            if clustermod.port_in_use(host, port):
+                clustermod.stop_listener(host, port)
+            self.takeoverDone.emit(model, True, "the running server")
+        threading.Thread(target=work, daemon=True).start()
+
+    def port_conflict(self, path: str = "", alive: bool = True) -> None:
+        """Offer the same three ways out of a busy port, wherever it came from.
+
+        A dialog with only Yes and No forces a choice between two things the
+        user may not want; the useful third option — stop what is there and
+        start again — is the one that actually resolves it.
+        """
+        host, port = self.cfg.runtime.host, self.cfg.runtime.port
+        url = self.cfg.runtime.url()
+        pid, name = clustermod.listener_on(host, port)
+        who = f"{name} (pid {pid})" if pid else "another process"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("That port is already in use")
+        box.setText(f"{who} is already using {url}.")
+        box.setInformativeText(
+            "A model cannot be loaded into a server Kestrel did not start. "
+            "Most often this is a llama-server left behind by a previous run."
+            if alive else
+            f"Port {port} is held but nothing is answering on it.")
+        restart = box.addButton("Stop it and start fresh", QMessageBox.AcceptRole)
+        reuse = box.addButton("Connect to it as it is", QMessageBox.ActionRole) \
+            if alive else None
+        change = box.addButton("Use a different port", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(restart)
+        box.exec()
+        clicked = box.clickedButton()
+
+        if clicked is restart:
+            self._takeover(path or self.cfg.model_path)
+        elif reuse is not None and clicked is reuse:
+            self.cfg.server_url = url
+            self._status(f"Using the server already running on {url}")
+            self.requestPrepare.emit()
+        elif clicked is change:
+            self._choose_new_port(path)
+
+    def _choose_new_port(self, path: str = "") -> None:
+        """Move to a free port instead of fighting for this one."""
+        suggestion = self.cfg.runtime.port
+        while suggestion < 65000 and clustermod.port_in_use(self.cfg.runtime.host,
+                                                            suggestion):
+            suggestion += 1
+        port, ok = QInputDialog.getInt(self, "Port", "Listen on port:",
+                                       suggestion, 1024, 65535)
+        if not ok:
+            return
+        self.cfg.runtime.port = port
+        self.cfg.server_url = self.cfg.runtime.url()
+        self.cfg.save()
+        self._with("params_panel", lambda p: p.refresh_preview())
+        self._status(f"Port set to {port}")
+        if path:
+            self.load_model(path)
+        else:
+            self.start_backend()
+
+    def _takeover(self, path: str) -> None:
+        """Stop the stranger on the port, then load as normal."""
+        host, port = self.cfg.runtime.host, self.cfg.runtime.port
+        self.busy_overlay.begin("Stopping the other server", f"{host}:{port}")
+
+        def work():
+            stopped, detail = clustermod.stop_listener(host, port)
+            self.takeoverDone.emit(path, stopped, detail)
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str, bool, str)
+    def _takeover_done(self, path: str, stopped: bool, detail: str) -> None:
+        self.busy_overlay.end()
+        if not stopped:
+            QMessageBox.warning(
+                self, "Could not stop it",
+                f"{detail}\n\nStop it yourself, or change the port under "
+                "Params \u2192 Runtime.")
+            self._status("Port still held")
+            return
+        self.chat.add_note(f"Stopped {detail} and took over the port.",
+                           theme.AMBER)
+        if path:
+            self.load_model(path)
+        else:
+            self.start_backend()
 
     def start_backend(self) -> None:
         """Bring llama.cpp up with no model loaded.
@@ -1733,7 +1901,10 @@ class MainWindow(QWidget):
         except Exception as e:
             self.busy_overlay.end()
             self._status(f"Could not start llama-server: {e}")
-            self.chat.add_error(f"Could not start llama-server: {e}")
+            if clustermod.is_port_problem(str(e)):
+                self.port_conflict()
+            else:
+                self.chat.add_error(f"Could not start llama-server: {e}")
             return
         self.log.appendPlainText("$ " + " ".join(server.command))
         self.cluster.start_btn.setEnabled(False)
@@ -1868,9 +2039,34 @@ class MainWindow(QWidget):
         self.chat.add_note(f"Reopened: {session.title}", theme.SIGNAL)
         self._status(f"Reopened conversation from {session.when()}")
 
+    def _ring(self) -> None:
+        """A short chime when a task ends.
+
+        Long tasks are worth walking away from, and a finished one is otherwise
+        indistinguishable from a stalled one at a glance.
+        """
+        if not self.cfg.bell_on_finish:
+            return
+        bell = Path(__file__).resolve().parent.parent.parent / "assets" / "bell.wav"
+        if not bell.exists():
+            return
+
+        def work():
+            try:
+                speechmod.play(bell, blocking=False)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     @Slot()
     def on_turn_finished(self) -> None:
         self.typing.stop()
+        self._ring()
+        agent = self.worker.agent
+        unfinished = bool(agent is not None and agent.todo is not None
+                          and agent.todo.items and not agent.todo.complete)
+        self.continue_btn.setEnabled(True)
+        self.continue_btn.setText("Continue" + (" ▸" if unfinished else ""))
         self._save_session()
         self.plan_panel.set_running(False)
         self.busy = False
@@ -1904,7 +2100,43 @@ class MainWindow(QWidget):
         self.plan_panel.set_running(True)
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.continue_btn.setEnabled(False)
         self.requestSend.emit(text)
+
+    def continue_task(self) -> None:
+        """Resume: the open step if there is one, otherwise where it left off.
+
+        A turn can end with work outstanding — stopped by hand, cut short by the
+        step limit, or a reply that trailed away. Retyping the request loses the
+        thread; this hands the model back its own place in the plan.
+        """
+        agent = self.worker.agent
+        if agent is None or self.busy:
+            return
+        if not agent.history:
+            self._status("Nothing to continue yet")
+            return
+        prompt = "Continue from where you stopped. Use your tools; do not repeat "\
+                 "work that is already done."
+        todo = agent.todo
+        if todo is not None and todo.items and not todo.complete:
+            done, total = todo.progress
+            current = todo.current
+            prompt = (f"Continue. {done} of {total} steps are done"
+                      + (f"; step {current.id} is open: {current.text}"
+                         if current else "")
+                      + ". Carry on with your tools, update the checklist as you "
+                        "go, and call finish only when every step is closed.")
+        self.chat.add_note("Continuing…", theme.TEXT_DIM)
+        self.busy = True
+        self.speaker.reset()
+        self.typing.start("thinking")
+        self.plan_panel.set_running(True)
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._pending_prompt = prompt
+        self._pending_mark = len(agent.history)
+        self.requestSend.emit(prompt)
 
     def stop(self) -> None:
         """Stop generation and speech together.
@@ -1942,6 +2174,28 @@ class MainWindow(QWidget):
         self.chat.add_note("Reconnecting…")
         self.requestPrepare.emit()
 
+    def open_downloads(self) -> None:
+        """Open the download window, creating it the first time.
+
+        The manager lives on the window rather than in the dialog, so transfers
+        carry on when it is closed and reopening shows them still running.
+        """
+        if self.downloads is None:
+            self.downloads = dlmod.DownloadManager(
+                max_concurrent=2, token=self.cfg.hf_token)
+        if self.downloads_window is None:
+            self.downloads_window = DownloadsWindow(self.cfg, self.downloads, self)
+            self.downloads_window.statusLine.connect(self._status)
+            self.downloads_window.finished.connect(self._downloaded)
+        self.downloads_window.show()
+        self.downloads_window.raise_()
+        self.downloads_window.activateWindow()
+
+    @Slot(str)
+    def _downloaded(self, path: str) -> None:
+        self.log.appendPlainText(f"[download] {path}")
+        self._with("models_panel", lambda p: p.rescan())
+
     def open_settings(self) -> None:
         """Application settings. Model settings live in the Params panel."""
         dlg = SettingsDialog(self.cfg, self)
@@ -1962,17 +2216,28 @@ class MainWindow(QWidget):
             self.apply_appearance()
             self.reconnect()
 
+    def shutdown_backend(self) -> None:
+        """Stop the server Kestrel started, once, from wherever exit came."""
+        if getattr(self, "_shut_down", False):
+            return
+        self._shut_down = True
+        try:
+            if self.cluster.server.running:
+                self.cluster.server.stop(wait_for_port=False)
+        except Exception:
+            pass
+
     def closeEvent(self, event):  # noqa: N802
         try:
+            if self.downloads is not None:
+                self.downloads.stop_all()
             if self.dictation is not None:
                 self.dictation.stop()
             self.speaker.stop()
             # A server Kestrel started belongs to Kestrel: leaving it running
             # holds the port and the model's memory after the window is gone.
-            # One adopted from elsewhere is left alone.
-            if self.cluster.server.running:
-                self.log.appendPlainText("[shutdown] stopping llama-server")
-                self.cluster.server.stop(wait_for_port=False)
+            self.log.appendPlainText("[shutdown] stopping llama-server")
+            self.shutdown_backend()
             self.worker.cancel()
             self.cluster.server.stop()
             self.thread.quit()
@@ -1988,11 +2253,29 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config.load()
     app.setStyleSheet(theme.apply(cfg.theme, ui=cfg.ui_font, mono=cfg.mono_font,
                                   size=cfg.font_size))
+    install_wheel_guard(app)
+    window_holder = {}
+
+    def shutdown():
+        # Belt and braces alongside the job object: a clean exit should not rely
+        # on closeEvent being delivered, and this runs on any route out of the
+        # event loop.
+        win = window_holder.get("win")
+        if win is not None:
+            try:
+                win.shutdown_backend()
+            except Exception:
+                pass
+
+    app.aboutToQuit.connect(shutdown)
+    atexit.register(shutdown)
+
     splash = Splash()
     splash.begin()
     splash.message("reading settings")
     try:
         win = MainWindow(cfg, progress=splash.message)
+        window_holder["win"] = win
         splash.message("ready")
         win.showMaximized()
     finally:

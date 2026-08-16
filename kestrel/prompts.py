@@ -107,15 +107,24 @@ def build_system(
 
 
 _PLAN_RULES = [
-    "Call plan first with one step per line. Mark each step doing when you start "
-    "it and done when it works. The checklist below is the live state.",
+    "If a checklist already exists below, work through it in order — do not "
+    "replace it. Otherwise call plan with one step per line. Mark each step "
+    "doing when you start it and done only when you have checked it works.",
     """## The checklist
 
-Before doing anything that takes more than one step, call plan with one step per
-line — three to seven is usually right. Then work it:
+**If a checklist is already shown below, it is your instructions.** It may have
+been written by hand rather than by you. Work through it in the order given,
+starting from the first step that is not done. Do not call plan — that would
+discard it. If a step turns out to be wrong or impossible, mark it blocked with
+the reason, or call plan_add for a step it turns out to need; otherwise follow
+what is written.
+
+If there is no checklist and the task takes more than one step, call plan with
+one step per line — three to seven is usually right. Either way, then work it:
 
 - mark a step doing with todo before you start it
-- mark it done as soon as it actually works, not when you intend to do it
+- mark it done only once you have evidence it worked — you ran the command, you
+  read the file back, the test passed — not when you intend to do it
 - mark it blocked with a short note if you cannot proceed
 - call plan_add if the task turns out to need a step you did not foresee
 

@@ -27,7 +27,7 @@ from ..runtime import CACHE_TYPES, REASONING_FORMATS, ROPE_SCALING, SPLIT_MODES
 from . import theme
 from PySide6.QtGui import QFont, QFontDatabase
 
-from .widgets import Field, Readout, mono_font, stretch_columns
+from .widgets import Field, GpuSplit, Readout, mono_font, stretch_columns
 
 # Windows ships bitmap-only faces with no outlines for Qt to instantiate;
 # listing them logs a DirectWrite failure each and yields nothing usable.
@@ -40,6 +40,7 @@ def _usable_font(family: str) -> bool:
 
 
 def _row(*widgets, stretch_last: bool = False) -> QWidget:
+    """Controls side by side, each free to shrink with the panel."""
     w = QWidget()
     w.setMinimumWidth(0)
     lay = QHBoxLayout(w)
@@ -78,6 +79,17 @@ class UiThread:
         self.uiCall.emit(fn)
 
 
+def _heading(text: str) -> QLabel:
+    """A section title, written as words rather than a shouted keyword.
+
+    The eyebrow style upper-cases and letter-spaces its text, which suits a
+    two-word field label and makes a section heading look like a warning label.
+    """
+    label = QLabel(text)
+    label.setObjectName("Section")
+    return label
+
+
 def _form() -> QFormLayout:
     """Labels above their fields.
 
@@ -87,6 +99,7 @@ def _form() -> QFormLayout:
     """
     form = QFormLayout()
     form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+    form.setHorizontalSpacing(6)
     form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     form.setLabelAlignment(Qt.AlignLeft)
     form.setContentsMargins(0, 0, 0, 0)
@@ -129,10 +142,9 @@ class ModelsPanel(UiThread, QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 8, 12, 8)
         lay.setSpacing(7)
-        tabs = QTabWidget()
-        tabs.addTab(_scroll(self._local_tab()), "Local")
-        tabs.addTab(_scroll(self._download_tab()), "Download")
-        lay.addWidget(tabs)
+        # Local models only: downloading has its own window, because it runs
+        # for an hour and is not something to watch inside a settings panel.
+        lay.addWidget(_scroll(self._local_tab()))
         self.rescan()
 
     # -- local ---------------------------------------------------------------
@@ -311,151 +323,6 @@ class ModelsPanel(UiThread, QWidget):
             self.cfg.save()
             self.rescan()
 
-    # -- download ------------------------------------------------------------
-    def _download_tab(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(4, 8, 4, 4)
-
-        self.hf_query = QLineEdit()
-        self.hf_query.setPlaceholderText("Search Hugging Face for GGUF models…")
-        self.hf_query.returnPressed.connect(self.hf_search)
-        btn = QPushButton("Search")
-        btn.clicked.connect(self.hf_search)
-        lay.addWidget(_row(self.hf_query, btn))
-
-        self.repos = QTreeWidget()
-        self.repos.setHeaderLabels(["Repository", "Downloads"])
-        self.repos.setObjectName("Flush")
-        self.repos.setFont(mono_font(10))
-        stretch_columns(self.repos)
-        self.repos.currentItemChanged.connect(self._list_files)
-        lay.addWidget(self.repos, 1)
-
-        self.files = QTreeWidget()
-        self.files.setHeaderLabels(["File", "Size"])
-        self.files.setObjectName("Flush")
-        self.files.setFont(mono_font(10))
-        stretch_columns(self.files)
-        lay.addWidget(self.files, 1)
-
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(True)
-        self.progress.hide()
-        lay.addWidget(self.progress)
-
-        self.dl_btn = QPushButton("Download")
-        self.dl_btn.setObjectName("Primary")
-        self.dl_btn.clicked.connect(self.download)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(lambda: setattr(self, "_dl_cancel", True))
-        lay.addWidget(_row(self.dl_btn, cancel))
-
-        hint = QLabel("Downloads land in the folder set under Runtime. Quantisations: "
-                      "Q4_K_M is the usual balance, Q5_K_M or Q6_K for more fidelity, "
-                      "Q3_K_M or IQ3 when memory is tight.")
-        hint.setWordWrap(True)
-        hint.setObjectName("Dim")
-        lay.addWidget(hint)
-        return w
-
-    def hf_search(self) -> None:
-        q = self.hf_query.text().strip()
-        if not q:
-            return
-        self.repos.clear()
-        self.repos.addTopLevelItem(QTreeWidgetItem(["searching…", ""]))
-
-        def work():
-            try:
-                results = modelsmod.search_repos(q)
-            except Exception as e:
-                # Bound now: the exception name is unbound once the except
-                # block ends, and this lambda runs later on the GUI thread.
-                message = str(e)
-                self.statusLine.emit(f"Hugging Face search failed: {message}")
-                self.ui(lambda m=message: (self.repos.clear(),
-                                           self.repos.addTopLevelItem(
-                                               QTreeWidgetItem([f"failed: {m}", ""]))))
-                return
-
-            def show():
-                self.repos.clear()
-                for r in results:
-                    it = QTreeWidgetItem([r.id, f"{r.downloads:,}"])
-                    it.setData(0, Qt.UserRole, r.id)
-                    self.repos.addTopLevelItem(it)
-            self.ui(show)
-            self.statusLine.emit(f"{len(results)} repositories")
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _list_files(self, item, _prev=None) -> None:
-        if item is None:
-            return
-        repo = item.data(0, Qt.UserRole)
-        if not repo:
-            return
-        self.files.clear()
-
-        def work():
-            try:
-                files = modelsmod.list_repo_files(repo)
-            except Exception as e:
-                self.statusLine.emit(f"Could not list files: {e}")
-                return
-
-            def show():
-                self.files.clear()
-                for f in files:
-                    it = QTreeWidgetItem([f.name, modelsmod.human_size(f.size)])
-                    it.setData(0, Qt.UserRole, (repo, f.name))
-                    self.files.addTopLevelItem(it)
-            self.ui(show)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def download(self) -> None:
-        item = self.files.currentItem()
-        if item is None:
-            QMessageBox.information(self, "No file", "Pick a .gguf file to download.")
-            return
-        repo, name = item.data(0, Qt.UserRole)
-        dest = self.cfg.download_dir or str(Path.home() / "models")
-        self._dl_cancel = False
-        self.progress.show()
-        self.progress.setValue(0)
-        self.dl_btn.setEnabled(False)
-
-        def on_progress(done, total):
-            if not total:
-                return
-            pct = int(1000 * done / total)
-            label = f"{modelsmod.human_size(done)} / {modelsmod.human_size(total)}  %p%"
-
-            def apply():
-                self.progress.setMaximum(1000)
-                self.progress.setValue(pct)
-                self.progress.setFormat(label)
-            self.ui(apply)
-
-        def work():
-            try:
-                path = modelsmod.download(repo, name, dest, on_progress,
-                                          lambda: self._dl_cancel, self.cfg.hf_token)
-                self.statusLine.emit(f"Downloaded to {path}")
-                self.logLine.emit(f"[download] {path}")
-                self.ui(self.rescan)
-            except InterruptedError:
-                self.statusLine.emit("Download cancelled")
-            except Exception as e:
-                self.statusLine.emit(f"Download failed: {e}")
-                self.logLine.emit(f"[download] failed: {e}")
-            finally:
-                self.ui(lambda: (self.progress.hide(), self.dl_btn.setEnabled(True)))
-
-        threading.Thread(target=work, daemon=True).start()
-
 # =========================================================== params panel ===
 class ParamsPanel(QWidget):
     """Everything adjustable, in one place.
@@ -498,11 +365,37 @@ class ParamsPanel(QWidget):
         self.rt_ctx.setSingleStep(1024); self.rt_ctx.setValue(rt.ctx_size)
         form.addRow("Context length", self.rt_ctx)
 
+        self.rt_budget = QSpinBox()
+        self.rt_budget.setRange(0, 262144)
+        self.rt_budget.setSingleStep(512)
+        self.rt_budget.setSpecialValueText("auto")
+        self.rt_budget.setToolTip("auto asks the device how much memory it has")
+        self.rt_budget.setValue(rt.gpu_budget_mb)
+        self.rt_budget.setSuffix(" MB")
+        form.addRow("GPU memory budget", self.rt_budget)
+        self.budget_note = QLabel("")
+        self.budget_note.setObjectName("Dim")
+        self.budget_note.setWordWrap(True)
+        form.addRow("", self.budget_note)
+
+        self.split = GpuSplit()
+        self.split.changed.connect(lambda v: self.rt_ngl.setValue(v))
+        form.addRow("Split between GPU and system RAM", self.split)
+
         self.rt_ngl = QSpinBox()
         self.rt_ngl.setRange(-1, 999)
-        self.rt_ngl.setSpecialValueText("auto — as many as fit")
+        self.rt_ngl.setSpecialValueText("auto")
+        self.rt_ngl.setToolTip("auto offloads as many layers as the device holds")
         self.rt_ngl.setValue(rt.n_gpu_layers)
-        form.addRow("GPU layers  (0 = CPU only, 999 = all)", self.rt_ngl)
+        self.rt_ngl.valueChanged.connect(
+            lambda v: self.split.set_value(v) if v >= 0 else None)
+        auto = QPushButton("Auto")
+        auto.setToolTip("Offload as many layers as the device can hold")
+        auto.clicked.connect(self._auto_split)
+        refresh = QPushButton("Recalculate")
+        refresh.setToolTip("Re-read the selected model and the device memory")
+        refresh.clicked.connect(self.refresh_split)
+        form.addRow("GPU layers  (0 = CPU only)", _row(self.rt_ngl, auto, refresh))
 
         self.rt_threads = QSpinBox(); self.rt_threads.setRange(0, 256); self.rt_threads.setValue(rt.threads)
         form.addRow("Threads", self.rt_threads)
@@ -569,6 +462,7 @@ class ParamsPanel(QWidget):
 
         lay.addLayout(form)
         apply_btn = QPushButton("Apply")
+        apply_btn.setObjectName("Primary")
         apply_btn.clicked.connect(self.apply_runtime)
         lay.addWidget(apply_btn)
         self.cmd_preview = QTextEdit()
@@ -578,7 +472,53 @@ class ParamsPanel(QWidget):
         lay.addWidget(Field("command preview", self.cmd_preview))
         lay.addStretch(1)
         self.refresh_preview()
+        self.refresh_split()
         return w
+
+    def _auto_split(self) -> None:
+        self.rt_ngl.setValue(-1)
+        self.refresh_split()
+        self.statusLine.emit(f"Auto: {self.split.fits} of {self.split.n_layer} "
+                             "layers on the GPU")
+
+    def refresh_split(self) -> None:
+        """Re-read the model and the device so the bar reflects both.
+
+        Done on demand rather than continuously: it parses a GGUF header and
+        asks the driver how much memory it has, neither of which is worth doing
+        on every repaint.
+        """
+        from .. import gguf, sysmon
+        from ..runtime import resolve_gpu_layers
+
+        info = None
+        if self.cfg.model_path:
+            try:
+                info = gguf.read(self.cfg.model_path, want_template=False)
+            except Exception:
+                info = None
+        vram = system = 0
+        integrated = False
+        try:
+            monitor = sysmon.Monitor()
+            gpus = monitor.gpus()
+            if gpus:
+                best = max(gpus, key=lambda g: g.budget_mb)
+                vram, integrated = best.budget_mb, best.integrated
+            system = monitor.sample().mem_total_mb
+        except Exception:
+            pass
+        if gpus:
+            self.budget_note.setText(
+                "  ·  ".join(f"{g.name}: {g.memory_summary()}" for g in gpus[:2]))
+        else:
+            self.budget_note.setText("No GPU counters available.")
+        vram = self.cfg.runtime.gpu_budget_mb or vram
+        current = self.cfg.runtime.n_gpu_layers
+        if current < 0:
+            current = resolve_gpu_layers(self.cfg) if self.cfg.model_path else 0
+        self.split.set_model(info, self.cfg.runtime.ctx_size or 4096,
+                             vram, system, integrated, current)
 
     def _pick_download_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Download folder", self.rt_dl.text())
@@ -602,6 +542,7 @@ class ParamsPanel(QWidget):
         rt.split_mode = self.rt_sm.currentText()
         rt.main_gpu = self.rt_mg.value()
         rt.tensor_split = self.rt_ts.text().strip()
+        rt.gpu_budget_mb = self.rt_budget.value()
         rt.rope_scaling = self.rt_rope.currentText()
         rt.rope_freq_base = self.rt_rope_base.value()
         rt.rope_freq_scale = self.rt_rope_scale.value()
@@ -770,9 +711,8 @@ class MemoryPanel(QWidget):
         lay.setContentsMargins(10, 8, 12, 8)
         lay.setSpacing(7)
 
-        blurb = QLabel("What Kestrel carries between sessions. Relevant entries are "
-                       "retrieved and injected each turn, within their own slice of "
-                       "the context budget. Pinned entries are always included.")
+        blurb = QLabel("Carried between sessions. Relevant entries are injected "
+                       "each turn; pinned ones always are.")
         blurb.setWordWrap(True)
         blurb.setObjectName("Dim")
         lay.addWidget(blurb)
@@ -966,6 +906,7 @@ class PlanPanel(QWidget):
         self.todo = None
         self._paused = False
         self._running = False
+        self._loading = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 8, 12, 8)
         lay.setSpacing(7)
@@ -985,6 +926,11 @@ class PlanPanel(QWidget):
         self.tree.setFont(mono_font(10))
         self.tree.setRootIsDecorated(False)
         self.tree.setWordWrap(True)
+        # Steps are edited where they are read: double-click the text, or press
+        # F2. A plan is a working document, and retyping it through a dialog to
+        # fix a word is friction the model does not have.
+        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.EditKeyPressed)
+        self.tree.itemChanged.connect(self._step_edited)
         stretch_columns(self.tree, first_stretch=1)
         lay.addWidget(self.tree, 1)
 
@@ -1039,9 +985,7 @@ class PlanPanel(QWidget):
         self.hint.setObjectName("Dim")
         lay.addWidget(self.hint)
 
-        note = QLabel("The checklist is re-sent with every prompt, so it survives "
-                      "compaction. Editing it here changes what the model works "
-                      "from on its next step.")
+        note = QLabel("Re-sent with every prompt, so it survives compaction.")
         note.setWordWrap(True)
         note.setObjectName("Dim")
         lay.addWidget(note)
@@ -1138,13 +1082,34 @@ class PlanPanel(QWidget):
             self.update_todo(self.todo)
             self.planEdited.emit()
 
+    def _step_edited(self, item, column: int) -> None:
+        """Write an edited step back to the checklist."""
+        if column != 1 or self._loading or self.todo is None:
+            return
+        item_id = item.data(0, Qt.UserRole)
+        if item_id is None:
+            return
+        text = item.text(1).split("  —")[0].strip()
+        if not text:
+            self.update_todo(self.todo)      # refuse to blank a step
+            return
+        if self.todo.update(int(item_id), note="") and text:
+            step = self.todo.get(int(item_id))
+            if step is not None and step.text != text:
+                step.text = text
+                self.todo.save()
+                self.planEdited.emit()
+                self.statusLine.emit(f"Step {item_id} updated")
+
     def update_todo(self, todo) -> None:
         self.todo = todo
+        self._loading = True
         self.tree.clear()
         if todo is None or not todo.items:
             self.head.setText("No plan yet — Add step… to write one.")
             self.bar.setMaximum(1)
             self.bar.setValue(0)
+            self._loading = False
             return
         done, total = todo.progress
         self.bar.setMaximum(max(1, total))
@@ -1171,12 +1136,16 @@ class PlanPanel(QWidget):
             row = QTreeWidgetItem([MARKS.get(item.status, " "),
                                    item.text + (f"  — {item.note}" if item.note else "")])
             row.setData(0, Qt.UserRole, item.id)
-            row.setToolTip(1, f"step {item.id} · {item.status}")
+            row.setFlags(row.flags() | Qt.ItemIsEditable)
+            row.setToolTip(1, f"step {item.id} · {item.status} — double-click to edit")
             colour = {DONE: theme.SIGNAL, DOING: theme.AMBER,
                       BLOCKED: theme.ALERT}.get(item.status, theme.TEXT_DIM)
             row.setForeground(0, QColor(colour))
             row.setForeground(1, QColor(theme.TEXT if item is current else theme.TEXT_DIM))
             self.tree.addTopLevelItem(row)
+        # Rebuilding the tree fires itemChanged for every row; the guard stops
+        # those being mistaken for the user typing.
+        self._loading = False
 
 
 # ========================================================== persona panel ===
@@ -1192,9 +1161,8 @@ class PersonaPanel(QWidget):
         lay.setContentsMargins(10, 8, 12, 8)
         lay.setSpacing(7)
 
-        blurb = QLabel("Personality is compiled into tiers, not loaded whole each "
-                       "turn. Voice ships in every prompt; the full background stays "
-                       "on disk until the model asks for it with the persona tool.")
+        blurb = QLabel("Compiled into tiers. Voice ships in every prompt; the "
+                       "full background stays on disk until asked for.")
         blurb.setWordWrap(True)
         blurb.setObjectName("Dim")
         lay.addWidget(blurb)
@@ -1303,69 +1271,63 @@ class BackendPanel(UiThread, QWidget):
         super().__init__(parent)
         self._init_ui_thread()
         self.cfg = cfg
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 12, 8)
-        lay.setSpacing(7)
 
-        blurb = QLabel("Kestrel needs llama-server. It looks on PATH and in the usual "
-                       "install locations; if there is nothing there it can fetch an "
-                       "official build, or compile one with RPC support so this machine "
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 0)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(10, 4, 12, 8)
+        lay.setSpacing(8)
+
+        lay.addWidget(_heading("Where Kestrel connects"))
+        self.url = QLineEdit(cfg.server_url)
+        lay.addWidget(Field("Server URL", self.url,
+                            "llama-server, LM Studio, llamafile, vLLM, or "
+                            "Ollama's /v1."))
+        self.api_key = QLineEdit(cfg.api_key)
+        self.api_key.setEchoMode(QLineEdit.Password)
+        lay.addWidget(Field("API key", self.api_key, "Blank for a local server."))
+        self.hf_token = QLineEdit(cfg.hf_token)
+        self.hf_token.setEchoMode(QLineEdit.Password)
+        lay.addWidget(Field("Hugging Face token", self.hf_token,
+                            "Only for gated repositories."))
+        self.server_bin = QLineEdit(cfg.llama_server_bin)
+        pick = QPushButton("Browse…")
+        pick.clicked.connect(self._pick_binary)
+        lay.addWidget(Field("llama-server binary", self.server_bin))
+        save = QPushButton("Save endpoint")
+        save.clicked.connect(self.save_endpoint)
+        lay.addWidget(_row(pick, save))
+
+        lay.addWidget(_heading("What was found on this machine"))
+        self.r_server = Readout("llama-server", "not found")
+        self.r_rpc = Readout("rpc-server", "not found")
+        self.r_version = Readout("version", "—")
+        for readout in (self.r_server, self.r_rpc, self.r_version):
+            lay.addWidget(readout)
+        scan = QPushButton("Scan again")
+        scan.clicked.connect(self.scan)
+        lay.addWidget(scan)
+
+        lay.addWidget(_heading("Install llama.cpp"))
+        blurb = QLabel("If llama.cpp is missing, Kestrel can fetch an official "
+                       "build or compile one with RPC support so this machine "
                        "can also act as a cluster worker.")
         blurb.setWordWrap(True)
         blurb.setObjectName("Dim")
         lay.addWidget(blurb)
 
-        head = QLabel("ENDPOINT")
-        head.setObjectName("Eyebrow")
-        lay.addWidget(head)
-        self.url = QLineEdit(cfg.server_url)
-        lay.addWidget(Field("Server URL", self.url,
-                            "Any OpenAI-compatible endpoint: llama-server, LM Studio, "
-                            "llamafile, vLLM, or Ollama's /v1."))
-        self.api_key = QLineEdit(cfg.api_key)
-        self.api_key.setEchoMode(QLineEdit.Password)
-        self.hf_token = QLineEdit(cfg.hf_token)
-        self.hf_token.setEchoMode(QLineEdit.Password)
-        lay.addWidget(Field("API key / Hugging Face token",
-                            _row(self.api_key, self.hf_token),
-                            "Blank for a local server. The token is only needed for "
-                            "gated model repositories."))
-        self.server_bin = QLineEdit(cfg.llama_server_bin)
-        pick = QPushButton("…")
-        pick.setMaximumWidth(34)
-        pick.clicked.connect(self._pick_binary)
-        lay.addWidget(Field("llama-server binary", _row(self.server_bin, pick)))
-        save = QPushButton("Save endpoint")
-        save.clicked.connect(self.save_endpoint)
-        lay.addWidget(save)
-
-        head2 = QLabel("DETECTED")
-        head2.setObjectName("Eyebrow")
-        lay.addWidget(head2)
-        self.r_server = Readout("llama-server", "not found")
-        self.r_rpc = Readout("rpc-server", "not found")
-        self.r_version = Readout("version", "—")
-        for r in (self.r_server, self.r_rpc, self.r_version):
-            lay.addWidget(r)
-
         self.backend = QComboBox()
         self.backend.addItems(llamacpp.BACKENDS)
         self.backend.setCurrentText(cfg.llama_backend)
         self.backend.currentTextChanged.connect(self._set_backend)
-        lay.addWidget(Field("accelerator", self.backend,
-                            f"auto inspects this machine and chooses: "
-                            f"{llamacpp.detect_backend()}"))
+        lay.addWidget(Field("Accelerator", self.backend,
+                            f"auto detects: {llamacpp.detect_backend()}"))
 
-        self.with_rpc = QCheckBox("Include the RPC backend")
+        self.with_rpc = QCheckBox("Include the RPC backend (needed for clustering)")
         self.with_rpc.setChecked(cfg.llama_with_rpc)
-        self.with_rpc.setToolTip("Required for this machine to join or host a cluster")
         self.with_rpc.toggled.connect(self._set_rpc)
         lay.addWidget(self.with_rpc)
-
-        scan = QPushButton("Scan again")
-        scan.clicked.connect(self.scan)
-        lay.addWidget(scan)
-
         self.reinstall = QCheckBox("Remove Kestrel's existing copy first")
         self.reinstall.setToolTip("Only removes what Kestrel installed; a system "
                                   "or package-manager build is left alone")
@@ -1374,21 +1336,23 @@ class BackendPanel(UiThread, QWidget):
         self.install_btn = QPushButton("Download official build")
         self.install_btn.setObjectName("Primary")
         self.install_btn.clicked.connect(lambda: self.install(source=False))
-        lay.addWidget(self.install_btn)
-
         self.build_btn = QPushButton("Build from source (with RPC)")
         self.build_btn.clicked.connect(lambda: self.install(source=True))
+        lay.addWidget(self.install_btn)
         lay.addWidget(self.build_btn)
-
         self.remove_btn = QPushButton("Remove Kestrel's copy")
         self.remove_btn.setObjectName("Danger")
         self.remove_btn.clicked.connect(self.remove)
         lay.addWidget(self.remove_btn)
 
         self.output = QTextEdit()
+        self.output.setObjectName("Flush")
         self.output.setReadOnly(True)
         self.output.setFont(mono_font(9))
+        self.output.setMinimumHeight(120)
         lay.addWidget(self.output, 1)
+
+        outer.addWidget(_scroll(inner))
         self.scan()
 
     def _pick_binary(self) -> None:
@@ -1559,8 +1523,15 @@ class SpeechPanel(UiThread, QWidget):
         test.clicked.connect(self.test_voice)
         lay.addWidget(test)
 
-        head = QLabel("DOWNLOAD A PIPER VOICE")
-        head.setObjectName("Eyebrow")
+        speed_note = QLabel("Voices come in qualities: low is several times "
+                            "faster to synthesise than medium and noticeably "
+                            "quicker to start, which matters most on a laptop.")
+        speed_note.setWordWrap(True)
+        speed_note.setObjectName("Dim")
+        lay.addWidget(speed_note)
+
+        head = QLabel("Download a voice")
+        head.setObjectName("Section")
         lay.addWidget(head)
         self.piper_list = QTreeWidget()
         self.piper_list.setHeaderLabels(["Voice", "Description"])
@@ -1621,8 +1592,8 @@ class SpeechPanel(UiThread, QWidget):
         test.clicked.connect(self.test_dictation)
         lay.addWidget(test)
 
-        head = QLabel("DOWNLOAD A WHISPER MODEL")
-        head.setObjectName("Eyebrow")
+        head = QLabel("Download a transcription model")
+        head.setObjectName("Section")
         lay.addWidget(head)
         self.whisper_list = QTreeWidget()
         self.whisper_list.setHeaderLabels(["Model", "Size", "Notes"])
@@ -1678,8 +1649,8 @@ class SpeechPanel(UiThread, QWidget):
         self.api_key.editingFinished.connect(self._save)
         lay.addWidget(Field("API key", self.api_key))
 
-        head = QLabel("INSTALL LOCAL ENGINES")
-        head.setObjectName("Eyebrow")
+        head = QLabel("Install the offline engines")
+        head.setObjectName("Section")
         lay.addWidget(head)
         hint = QLabel("Piper for speech out, faster-whisper for dictation, "
                       "sounddevice for the microphone. Installed into Kestrel's "
@@ -1758,6 +1729,7 @@ class SpeechPanel(UiThread, QWidget):
 
     def _engine_changed(self) -> None:
         self._save()
+        self.speech.close_stream()      # a different voice needs a new process
         self.refresh()
 
     def _toggle_network(self, on: bool) -> None:
@@ -1804,10 +1776,15 @@ class SpeechPanel(UiThread, QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def test_voice(self) -> None:
+        self.statusLine.emit("Loading the voice…")
+
         def work():
+            sample = "Kestrel is ready. This is the selected voice."
             try:
-                self.speech.speak("Kestrel is ready. This is the selected voice.",
-                                  blocking=True)
+                if self.speech.speak_now(sample):
+                    self.statusLine.emit("Voice test complete")
+                    return
+                self.speech.speak(sample, blocking=True)
                 self.statusLine.emit("Voice test complete")
             except Exception as e:
                 self.statusLine.emit(f"Voice test failed: {e}")
@@ -1962,6 +1939,11 @@ class SystemPanel(QWidget):
             meter = _Meter("GPU")
             self.gpu_meters.append(meter)
             self.gpu_box.addWidget(meter)
+        if not s.gpus and not s.gpus_scanned and not self.gpu_meters:
+            meter = _Meter("GPU")
+            meter.set_value(0, "looking…")
+            self.gpu_meters.append(meter)
+            self.gpu_box.addWidget(meter)
         for meter, gpu in zip(self.gpu_meters, s.gpus):
             meter.label.setText((gpu.name or "GPU")[:26])
             if gpu.utilisation >= 0:
@@ -1979,15 +1961,22 @@ class SystemPanel(QWidget):
             lines.append(f"swap   {s.swap_used_mb / 1024:.1f} / "
                          f"{s.swap_total_mb / 1024:.1f} GB")
         for gpu in s.gpus:
-            bits = [gpu.name or "GPU"]
-            if gpu.mem_total_mb:
-                bits.append(f"{gpu.mem_used_mb} / {gpu.mem_total_mb} MB")
+            lines.append(gpu.name or "GPU")
+            lines.append(f"  {gpu.memory_summary()}")
+            extra = []
+            if gpu.mem_used_mb:
+                extra.append(f"{gpu.mem_used_mb} MB in use")
             if gpu.temperature >= 0:
-                bits.append(f"{gpu.temperature:.0f}C")
-            lines.append("  ".join(bits))
+                extra.append(f"{gpu.temperature:.0f}C")
+            if extra:
+                lines.append("  " + "  ".join(extra))
         if not s.gpus:
-            lines.append("No GPU counters available. nvidia-smi or rocm-smi "
-                         "provides them when the driver is installed.")
+            # Reading GPU counters spawns a process and takes a second or two.
+            # Saying there is none while still looking is simply wrong.
+            lines.append("Looking for a GPU…" if not s.gpus_scanned else
+                         "No GPU counters available. nvidia-smi, rocm-smi or the "
+                         "Windows GPU counters provide them when a driver is "
+                         "installed.")
         self.detail.setPlainText("\n".join(lines))
 
 
@@ -2044,8 +2033,8 @@ class ProjectsPanel(UiThread, QWidget):
         lay.setContentsMargins(10, 8, 12, 8)
         lay.setSpacing(7)
 
-        head = QLabel("WORKSPACE")
-        head.setObjectName("Eyebrow")
+        head = QLabel("Working folder")
+        head.setObjectName("Section")
         lay.addWidget(head)
 
         # The path is the long thing here, so it gets the full width and the
@@ -2069,8 +2058,8 @@ class ProjectsPanel(UiThread, QWidget):
         use.clicked.connect(self.apply_location)
         lay.addWidget(use)
 
-        head2 = QLabel("CONVERSATIONS")
-        head2.setObjectName("Eyebrow")
+        head2 = QLabel("Saved conversations")
+        head2.setObjectName("Section")
         lay.addWidget(head2)
 
         self.session_list = QListWidget()
@@ -2156,3 +2145,80 @@ class ProjectsPanel(UiThread, QWidget):
                                 "Delete this saved conversation?") == QMessageBox.Yes:
             sessionmod.delete_session(self.sessions[row])
             self.refresh_sessions()
+
+
+# ============================================================ tools panel ===
+class ToolsPanel(QWidget):
+    """What the model can actually do.
+
+    The system prompt lists these to the model but not to the reader, so the
+    only way to know what an agent was able to reach was to read the source.
+    Danger is shown because it decides what the approval setting will stop.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setSpacing(7)
+
+        blurb = QLabel("Every tool the model can call. Writes and shell commands "
+                       "follow the approval setting.")
+        blurb.setWordWrap(True)
+        blurb.setObjectName("Dim")
+        lay.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Tool", "Access"])
+        self.tree.setObjectName("Flush")
+        self.tree.setFont(mono_font(10))
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        stretch_columns(self.tree)
+        self.tree.currentItemChanged.connect(self._show)
+        lay.addWidget(self.tree, 2)
+
+        self.detail = QTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setObjectName("Flush")
+        self.detail.setFont(mono_font(10))
+        lay.addWidget(self.detail, 1)
+
+        self.count = QLabel("")
+        self.count.setObjectName("Dim")
+        lay.addWidget(self.count)
+        self.tools: list[dict] = []
+
+    def update_tools(self, tools: list[dict]) -> None:
+        self.tools = list(tools or [])
+        self.tree.clear()
+        access = {"safe": "read", "write": "writes", "exec": "runs commands"}
+        for tool in self.tools:
+            item = QTreeWidgetItem([tool["name"], access.get(tool["danger"], "")])
+            colour = {"write": theme.AMBER, "exec": theme.ALERT}.get(tool["danger"])
+            if colour:
+                item.setForeground(1, QColor(colour))
+            item.setToolTip(0, tool["summary"])
+            self.tree.addTopLevelItem(item)
+        self.count.setText(f"{len(self.tools)} tools available")
+        if self.tools:
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+
+    def _show(self, item, _previous=None) -> None:
+        if item is None:
+            return
+        tool = next((t for t in self.tools if t["name"] == item.text(0)), None)
+        if tool is None:
+            return
+        lines = [tool["signature"], "", tool["summary"]]
+        if tool["detail"]:
+            lines += ["", tool["detail"]]
+        if tool["params"]:
+            lines.append("")
+            for name, kind, required, desc in tool["params"]:
+                mark = "required" if required else "optional"
+                lines.append(f"  {name} ({kind}, {mark})")
+                if desc:
+                    lines.append(f"      {desc}")
+        self.detail.setPlainText("\n".join(lines))

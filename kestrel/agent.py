@@ -142,6 +142,7 @@ class Agent:
         self.cancelled = threading.Event()
         self.paused = threading.Event()
         self._recent: list[str] = []       # signatures, for loop detection
+        self._prose_streak = 0
         self.skills: list[skillmod.Skill] = []
         self.registry: Registry | None = None
         self.dialect = "text"
@@ -209,6 +210,11 @@ class Agent:
             "model": self.client.model_name(),
             "budget": self.budget,
             "memories": self.memory.count() if self.memory else 0,
+            "tool_list": [
+                {"name": t.name, "summary": t.summary, "danger": t.danger,
+                 "signature": t.signature(), "detail": t.detail,
+                 "params": [(p.name, p.type, p.required, p.desc) for p in t.params]}
+                for t in self.registry.tools.values()],
             "thinking": self.cfg.thinking.mode if self.cfg.thinking.enabled else "off",
             "persona": (self.persona.name if self.persona and self.persona.any_content()
                         else ""),
@@ -369,6 +375,11 @@ class Agent:
         self.history.append({"role": "user", "content": user_text})
         self._turn_log = [f"user: {user_text}"]
         self._recent = []
+        self._prose_streak = 0
+        briefing = self._plan_briefing()
+        if briefing:
+            self.history.append({"role": "user", "content": briefing})
+        self._finish_blocks = 0
         memory_block = self._memory_block(user_text)
         self._autoplan(user_text)
         final = ""
@@ -427,7 +438,18 @@ class Agent:
             calls = self._extract(res)
 
             if not calls:
-                # Plain prose ends the turn.
+                # Prose ends the turn only when there is nothing left to do.
+                # Without this a model answers the first step and stops, leaving
+                # a checklist it wrote itself half finished.
+                nudge = self._unfinished_business(content)
+                if nudge:
+                    self._prose_streak += 1
+                    self.history.append({"role": "assistant",
+                                         "content": strip_calls(content).strip()
+                                         or "(continuing)"})
+                    self.history.append({"role": "user", "content": nudge})
+                    self.emit("continuing", {"reason": nudge, "step": step})
+                    continue
                 answer = collapse_repeats(strip_calls(content).strip())
                 if not answer:
                     answer = "(the model returned nothing usable)"
@@ -437,12 +459,24 @@ class Agent:
                 self._capture()
                 return answer
 
+            self._prose_streak = 0
             self._record_assistant(content, calls)
 
             for call in calls:
                 if self.cancelled.is_set():
                     break
                 self.emit("tool_call", {"name": call.name, "args": call.args})
+                if call.name == "finish" and self._premature_finish():
+                    done, total = self.todo.progress
+                    result = ToolResult(
+                        f"Not finished: {total - done} step(s) are still open. "
+                        "Close them, mark them blocked with a reason, or remove "
+                        "them from the plan, then call finish again.", ok=False)
+                    shown = self._spool(call.name, result) + self._plan_status()
+                    self.emit("tool_result", {"name": call.name, "ok": False,
+                                              "text": result.display, "shown": shown})
+                    self._record_tool(call, shown)
+                    continue
                 if call.name == "finish":
                     final = collapse_repeats(
                         str(call.args.get("answer") or "").strip()) or "Done."
@@ -479,6 +513,9 @@ class Agent:
                     else:
                         self.todo.stale_steps += 1
                         shown += self.todo.nudge()
+                    # Every result carries the plan state, so the model is never
+                    # more than one message away from knowing where it is.
+                    shown += self._plan_status()
                 # Only that a tool ran, never what it returned. Feeding results
                 # into the capture pass is what fills memory with the date, the
                 # contents of a directory, and the text of whatever was read.
@@ -493,7 +530,84 @@ class Agent:
         self.history.append({"role": "assistant", "content": msg})
         return msg
 
+    # -- keeping going ---------------------------------------------------------
+    def _unfinished_business(self, content: str) -> str:
+        """Why the turn should continue, or an empty string if it should not.
+
+        The checklist is the definition of done. If the model has written one
+        and steps remain open, a prose reply is a status update rather than an
+        answer, and the work carries on.
+        """
+        if not self.cfg.plan_driven or self.todo is None or not self.todo.items:
+            return ""
+        if self.todo.complete:
+            return ""
+        # Three prose replies in a row means it is talking rather than working;
+        # continuing past that produces a monologue, not progress.
+        if self._prose_streak >= 3:
+            return ""
+        # Only a real question stops the work. "Let me know if you want me to
+        # continue" is the stall this exists to override, not a request for a
+        # decision — and a model that genuinely cannot proceed should mark the
+        # step blocked rather than stop the turn.
+        said = strip_calls(content).strip()
+        tail = said[-240:].lower()
+        asking = "?" in tail and any(
+            word in tail for word in ("which", "should i", "do you want",
+                                      "would you prefer", "confirm", "or should"))
+        if asking:
+            return ""
+        current = self.todo.current
+        if current is None:
+            return ""
+        done, total = self.todo.progress
+        return (f"{done} of {total} steps are done. Step {current.id} is still "
+                f"open: {current.text}\n"
+                "Carry on with it now using your tools. Update the checklist as "
+                "you go, and call finish only once every step is closed or "
+                "blocked.")
+
+    def _premature_finish(self) -> bool:
+        """Is the model calling finish with work still on the checklist?
+
+        Allowed twice: the plan may genuinely have been overtaken by events, and
+        refusing forever would trap the turn.
+        """
+        if not self.cfg.plan_driven or self.todo is None or not self.todo.items:
+            return False
+        if self.todo.complete:
+            return False
+        self._finish_blocks = getattr(self, "_finish_blocks", 0) + 1
+        return self._finish_blocks <= 2
+
+    def _plan_status(self) -> str:
+        """A one-line reminder appended to each tool result."""
+        if self.todo is None or not self.todo.items or self.todo.complete:
+            return ""
+        done, total = self.todo.progress
+        current = self.todo.current
+        where = f"; on step {current.id}: {current.text[:60]}" if current else ""
+        return f"\n[plan {done}/{total}{where}]"
+
     # -- planning --------------------------------------------------------------
+    def _plan_briefing(self) -> str:
+        """Aim the model at a checklist it did not write.
+
+        A plan typed in by hand arrives with no conversation behind it, so the
+        model has no reason to treat it as instructions unless it is told. This
+        is a single line, injected once per turn, naming the step to start on.
+        """
+        if self.todo is None or not self.todo.items or self.todo.complete:
+            return ""
+        current = self.todo.current
+        if current is None:
+            return ""
+        done, total = self.todo.progress
+        return (f"[checklist: {done} of {total} done. Start with step "
+                f"{current.id}: {current.text}. Work through the steps in order, "
+                "marking each done once you have checked it. Do not call plan; "
+                "the checklist already exists.]")
+
     def _autoplan(self, user_text: str) -> None:
         """Seed the checklist for a fresh multi-step task.
 
@@ -503,11 +617,11 @@ class Agent:
         generation on it, or when the request is plainly a single action.
         """
         if (self.todo is None or not self.cfg.todo_enabled or not self.cfg.auto_plan
-                or self.budget.n_ctx < 6000):
+                or self.budget.n_ctx < 4000):
             return
         if self.todo.items and not self.todo.complete:
             return          # a plan is already running; let the model revise it
-        if len(user_text.split()) < 6:
+        if len(user_text.split()) < 4:
             return          # "list the files" does not need a checklist
         # Streamed, so the checklist fills in line by line rather than
         # appearing all at once after a silent pause.

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -191,6 +192,58 @@ def build_command(cfg: Config, host: str = "", port: int = 0,
     return _build(cfg, rpc=rpc, with_model=with_model)
 
 
+def _ngl_of(command: list[str]) -> int:
+    for index, token in enumerate(command):
+        if token in ("-ngl", "--n-gpu-layers") and index + 1 < len(command):
+            try:
+                return int(command[index + 1])
+            except ValueError:
+                return -1
+    return -1
+
+
+# The wording differs by backend and by driver; these are the phrases each one
+# actually prints. Intel's Vulkan driver says "allocation of N failed", which an
+# "out of memory" match alone would miss.
+OUT_OF_MEMORY = (
+    "out of memory", "outofdevicememory", "outofhostmemory",
+    "failed to allocate", "cannot allocate", "allocation failed",
+    "unable to allocate", "insufficient memory", "oom",
+    "ggml_backend_alloc", "buffer allocation failed", "cudamalloc",
+    "hipmalloc", "vk::device::allocatememory",
+)
+ALLOCATION_SHAPE = re.compile(r"allocation of \d+ failed|failed to allocate \d+", re.I)
+
+
+PORT_TROUBLE = ("already in use", "address already in use", "port", "eaddrinuse",
+                "bind", "did not stop", "already running", "10048")
+
+
+def is_port_problem(text: str) -> bool:
+    """Did this fail because something else holds the address?
+
+    The wording differs between llama.cpp, the operating system and Kestrel's
+    own messages, and all of them mean the same thing to the person reading it.
+    """
+    low = (text or "").lower()
+    if "out of memory" in low or "allocat" in low:
+        return False                      # that is a different failure entirely
+    return any(marker in low for marker in PORT_TROUBLE)
+
+
+def looks_like_oom(text: str) -> bool:
+    """Did this fail because the offload did not fit?
+
+    llama.cpp reports allocation failures in several shapes depending on the
+    backend, and the useful response to all of them is the same: put fewer
+    layers on the device and try again.
+    """
+    low = (text or "").lower()
+    if any(marker in low for marker in OUT_OF_MEMORY):
+        return True
+    return bool(ALLOCATION_SHAPE.search(text or ""))
+
+
 def port_in_use(host: str, port: int, timeout: float = 0.6) -> bool:
     target = "127.0.0.1" if host in ("0.0.0.0", "") else host
     try:
@@ -198,6 +251,66 @@ def port_in_use(host: str, port: int, timeout: float = 0.6) -> bool:
             return True
     except OSError:
         return False
+
+
+def listener_on(host: str, port: int) -> tuple[int, str]:
+    """Which process is holding this port, as (pid, name).
+
+    A llama-server left behind by a previous run — a crash, a forced quit —
+    keeps answering on the port, so Kestrel finds a healthy endpoint it did not
+    start and refuses to load into it. Knowing what is there turns that from a
+    dead end into an offer to replace it.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0, ""
+    target = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.status != psutil.CONN_LISTEN or not conn.laddr:
+                continue
+            if conn.laddr.port != int(port):
+                continue
+            if conn.laddr.ip not in (target, "0.0.0.0", "::", "127.0.0.1"):
+                continue
+            if not conn.pid:
+                continue
+            try:
+                return conn.pid, psutil.Process(conn.pid).name()
+            except Exception:
+                return conn.pid, ""
+    except Exception:
+        return 0, ""
+    return 0, ""
+
+
+LLAMA_NAMES = ("llama-server", "llama-server.exe", "llama", "llama.exe",
+               "server", "server.exe")
+
+
+def stop_listener(host: str, port: int, timeout: float = 8.0) -> tuple[bool, str]:
+    """End whatever holds the port. Returns (stopped, description)."""
+    pid, name = listener_on(host, port)
+    if not pid:
+        return False, "could not identify the process holding the port"
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout * 0.6)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=timeout * 0.4)
+    except Exception as e:
+        return False, f"{name or pid}: {e}"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not port_in_use(host, port, timeout=0.4):
+            return True, name or str(pid)
+        time.sleep(0.3)
+    return False, f"{name or pid} did not release the port"
 
 
 def endpoint_alive(url: str, timeout: float = 2.5) -> bool:
@@ -215,6 +328,77 @@ def endpoint_alive(url: str, timeout: float = 2.5) -> bool:
     return False
 
 
+def _win_job_handle():
+    """A Windows job object that kills its children when Kestrel exits.
+
+    Asking a child to stop only works if Kestrel gets the chance to ask. A
+    crash, a kill from Task Manager, or a close the window manager does not
+    deliver leaves llama.exe running and holding both the port and the model's
+    memory. A job object with KILL_ON_JOB_CLOSE makes the operating system
+    enforce it instead: when the last handle closes — however Kestrel ended —
+    the child goes with it.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.POINTER(wintypes.ULONG)),
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                        ("WriteOperationCount", ctypes.c_ulonglong),
+                        ("OtherOperationCount", ctypes.c_ulonglong),
+                        ("ReadTransferCount", ctypes.c_ulonglong),
+                        ("WriteTransferCount", ctypes.c_ulonglong),
+                        ("OtherTransferCount", ctypes.c_ulonglong)]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                        ("IoInfo", IO_COUNTERS),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = 0x2000   # KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(job, 9, ctypes.byref(info),
+                                         ctypes.sizeof(info))
+        return job
+    except Exception:
+        return None
+
+
+_JOB = _win_job_handle()
+
+
+def _adopt_into_job(proc) -> None:
+    if _JOB is None or proc is None:
+        return
+    try:
+        import ctypes
+        handle = int(proc._handle)             # the Popen's process handle
+        ctypes.WinDLL("kernel32").AssignProcessToJobObject(_JOB, handle)
+    except Exception:
+        pass
+
+
 class ServerProcess:
     """Supervises a locally launched llama-server."""
 
@@ -222,6 +406,7 @@ class ServerProcess:
         self.proc: subprocess.Popen | None = None
         self.on_log = on_log or (lambda line: None)
         self.command: list[str] = []
+        self.attempted_ngl = -1
         self.command_host = ""
         self.command_port = 0
         self.tail: list[str] = []
@@ -251,6 +436,7 @@ class ServerProcess:
                     "The running server did not stop. Close it from the Cluster "
                     "tab, or change the port under Params \u2192 Runtime.")
         self.command = build_command(cfg, host, port, with_model=with_model)
+        self.attempted_ngl = _ngl_of(self.command)
         self.command_host = cfg.runtime.host
         self.command_port = cfg.runtime.port
         self.tail = []
@@ -277,6 +463,7 @@ class ServerProcess:
             self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, errors="replace", bufsize=1, creationflags=creation,
         )
+        _adopt_into_job(self.proc)
         self._reader = threading.Thread(target=self._pump, args=(self.proc,),
                                         daemon=True)
         self._reader.start()

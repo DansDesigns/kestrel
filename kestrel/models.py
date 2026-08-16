@@ -20,6 +20,8 @@ import requests
 from .gguf import GGUFInfo, PART_RE, read
 
 HF_API = "https://huggingface.co/api"
+# Some networks and proxies reject requests without one.
+USER_AGENT = "kestrel/0.1 (+https://github.com/dansdesigns/kestrel)"
 HF_HOST = "https://huggingface.co"
 
 
@@ -192,26 +194,58 @@ class RepoResult:
     files: list[RepoFile] = field(default_factory=list)
 
 
-def search_repos(query: str, limit: int = 20, timeout: float = 20.0) -> list[RepoResult]:
-    """Search Hugging Face for GGUF repositories."""
-    params = {"search": query, "filter": "gguf", "limit": limit,
-              "sort": "downloads", "direction": -1}
-    r = requests.get(f"{HF_API}/models", params=params, timeout=timeout)
-    r.raise_for_status()
-    out = []
-    for item in r.json():
-        out.append(RepoResult(
-            id=str(item.get("modelId") or item.get("id") or ""),
-            downloads=int(item.get("downloads") or 0),
-            likes=int(item.get("likes") or 0),
-            updated=str(item.get("lastModified") or "")[:10],
-        ))
-    return [x for x in out if x.id]
+SORTS = {"downloads": "downloads", "likes": "likes",
+         "modified": "lastModified", "created": "createdAt"}
 
 
-def list_repo_files(repo: str, timeout: float = 20.0) -> list[RepoFile]:
+def _auth(token: str = "") -> dict:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def search_repos(query: str, limit: int = 30, timeout: float = 20.0,
+                 sort: str = "downloads", token: str = "") -> list[RepoResult]:
+    """Search Hugging Face for GGUF repositories.
+
+    A token is optional and only matters for gated or private repositories,
+    which are otherwise invisible in the results.
+    """
+    def query_api(with_filter: bool) -> list[RepoResult]:
+        params = {"search": query, "limit": limit,
+                  "sort": SORTS.get(sort, "downloads"), "direction": -1}
+        if with_filter:
+            params["filter"] = "gguf"
+        r = requests.get(f"{HF_API}/models", params=params, timeout=timeout,
+                         headers={"User-Agent": USER_AGENT, **_auth(token)})
+        r.raise_for_status()
+        found = []
+        for item in r.json():
+            name = str(item.get("modelId") or item.get("id") or "")
+            if not name:
+                continue
+            found.append(RepoResult(
+                id=name,
+                downloads=int(item.get("downloads") or 0),
+                likes=int(item.get("likes") or 0),
+                updated=str(item.get("lastModified") or "")[:10],
+            ))
+        return found
+
+    results = query_api(with_filter=True)
+    if not results:
+        # The tag filter is the usual reason a search comes back empty: a
+        # repository holding GGUF files is not always tagged as one. Retrying
+        # without it and keeping the plausible names finds them anyway.
+        loose = query_api(with_filter=False)
+        results = [r for r in loose
+                   if "gguf" in r.id.lower() or "gguf" in query.lower()] or loose
+    return results
+
+
+def list_repo_files(repo: str, timeout: float = 20.0,
+                    token: str = "") -> list[RepoFile]:
     r = requests.get(f"{HF_API}/models/{repo}/tree/main", timeout=timeout,
-                     params={"recursive": "true"})
+                     params={"recursive": "true"},
+                     headers={"User-Agent": USER_AGENT, **_auth(token)})
     r.raise_for_status()
     files = []
     for item in r.json():

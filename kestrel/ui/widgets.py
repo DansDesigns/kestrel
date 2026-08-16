@@ -11,10 +11,12 @@ from __future__ import annotations
 import html
 import re
 
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter, QPen,
                            QPixmap, QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QLabel, QSizePolicy,
+from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
+                               QApplication, QComboBox, QHBoxLayout, QHeaderView,
+                               QLabel, QPlainTextEdit, QSizePolicy, QSlider,
                                QTabBar, QTextBrowser, QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -665,6 +667,14 @@ class Field(QWidget):
 
 
 class Readout(QWidget):
+    """A labelled value that does not drag the panel wider than it should be.
+
+    A full filesystem path in a plain QLabel reports a minimum width equal to
+    its own text, and a panel is at least as wide as the widest thing in it —
+    so one long path was enough to force a horizontal scrollbar across the whole
+    tab. The value is elided to fit and kept in full in the tooltip.
+    """
+
     def __init__(self, label: str, value: str = "—", parent=None):
         super().__init__(parent)
         lay = QHBoxLayout(self)
@@ -672,13 +682,30 @@ class Readout(QWidget):
         name = QLabel(label)
         name.setObjectName("Eyebrow")
         name.setMinimumWidth(96)
+        name.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self.value = QLabel(value)
         self.value.setObjectName("Readout")
+        self.value.setMinimumWidth(0)
+        self.value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._full = value
         lay.addWidget(name)
         lay.addWidget(self.value, 1)
 
     def set(self, text: str) -> None:
-        self.value.setText(text)
+        self._full = str(text)
+        self.value.setToolTip(self._full)
+        self._elide()
+
+    def _elide(self) -> None:
+        metrics = self.value.fontMetrics()
+        width = max(40, self.value.width())
+        # The middle goes, not the end: the interesting parts of a path are the
+        # start and the filename.
+        self.value.setText(metrics.elidedText(self._full, Qt.ElideMiddle, width))
+
+    def resizeEvent(self, event):  # noqa: N802
+        self._elide()
+        super().resizeEvent(event)
 
 
 class CollapseHandle(QWidget):
@@ -846,6 +873,10 @@ def _draw_glyph(kind: str, size: int = 20, colour: str = "") -> QIcon:
         p.drawLine(int(a), int(a + 3), int(mid - 1), int(a + 3))
         p.drawLine(int(mid - 1), int(a + 3), int(mid + 1), int(a + 6))
         p.drawRect(QRectF(a, a + 6, b - a, b - a - 8))
+    elif kind == "tools":                      # spanner
+        p.drawLine(int(a + 3), int(b - 3), int(b - 5), int(a + 5))
+        p.drawArc(QRectF(b - 9, a, 9, 9), 40 * 16, 260 * 16)
+        p.drawEllipse(QRectF(a + 1, b - 6, 5, 5))
     elif kind == "monitor":                    # bar chart
         for i, h in enumerate((5, 10, 7, 12)):
             x = a + 1 + i * (b - a - 2) / 3.4
@@ -1121,3 +1152,203 @@ class LazyTab(QWidget):
     def showEvent(self, event):  # noqa: N802
         self.ensure()
         super().showEvent(event)
+
+
+class GpuSplit(QWidget):
+    """Choose how much of a model sits in graphics memory and how much in RAM.
+
+    llama.cpp offloads whole layers, so the split is a count rather than a
+    percentage — but a count means nothing without knowing what it costs. The
+    bar shows both sides in gigabytes as the handle moves, and marks the point
+    beyond which the graphics device runs out, because exceeding it is what
+    makes a model fail to load rather than run slowly.
+    """
+
+    changed = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.n_layer = 0
+        self.per_layer_mb = 0.0
+        self.vram_mb = 0
+        self.system_mb = 0
+        self.fits = 0
+        self.integrated = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        self.bar = _SplitBar(self)
+        lay.addWidget(self.bar)
+
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setMinimumHeight(22)      # room for the handle to be grabbed
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(0)
+        self.slider.valueChanged.connect(self._moved)
+        lay.addWidget(self.slider)
+
+        self.caption = QLabel("No model selected.")
+        self.caption.setObjectName("Dim")
+        self.caption.setWordWrap(True)
+        lay.addWidget(self.caption)
+
+    def set_model(self, info, ctx: int, vram_mb: int, system_mb: int,
+                  integrated: bool, value: int) -> None:
+        self.n_layer = info.n_layer if info else 0
+        self.vram_mb, self.system_mb, self.integrated = vram_mb, system_mb, integrated
+        if info and info.n_layer and info.file_size:
+            weights = (info.file_size / (1024 ** 2)) / info.n_layer
+            kv = 0.0
+            if info.n_embd and ctx:
+                kv = (2 * info.n_embd * ctx * 2) / (1024 ** 2) / 1
+            self.per_layer_mb = weights + kv
+        else:
+            self.per_layer_mb = 0.0
+        from ..gguf import layers_that_fit
+        self.fits = (layers_that_fit(info, vram_mb, ctx, integrated=integrated,
+                                     system_mb=system_mb) if info else 0)
+        self.slider.blockSignals(True)
+        self.slider.setMaximum(max(0, self.n_layer))
+        self.slider.setValue(max(0, min(self.n_layer, value)))
+        self.slider.blockSignals(False)
+        self._refresh()
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def set_value(self, layers: int) -> None:
+        self.slider.setValue(max(0, min(self.n_layer, layers)))
+
+    def _moved(self, value: int) -> None:
+        self._refresh()
+        self.changed.emit(value)
+
+    def _refresh(self) -> None:
+        layers = self.slider.value()
+        gpu_mb = layers * self.per_layer_mb
+        ram_mb = max(0, (self.n_layer - layers)) * self.per_layer_mb
+        self.bar.set_split(layers, self.n_layer, self.fits)
+        if not self.n_layer:
+            self.caption.setText("No model selected — pick one in the Models tab.")
+            return
+        over = ""
+        if self.fits and layers > self.fits:
+            over = ("  ·  beyond what the device reported; it may fail to "
+                    "allocate" if not self.integrated else
+                    "  ·  beyond the shared budget; it may fail to allocate")
+        shared = (" (shared with system memory)" if self.integrated else "")
+        self.caption.setText(
+            f"GPU {gpu_mb / 1024:.1f} GB{shared}   ·   system RAM "
+            f"{ram_mb / 1024:.1f} GB   ·   {layers} of {self.n_layer} layers"
+            f"{over}")
+
+
+class _SplitBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(26)
+        self.layers = 0
+        self.total = 0
+        self.fits = 0
+
+    def set_split(self, layers: int, total: int, fits: int) -> None:
+        self.layers, self.total, self.fits = layers, total, fits
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(Qt.NoPen)
+        p.fillRect(QRectF(0, 3, w, h - 13), QColor(theme.PANEL))
+        if not self.total:
+            p.end()
+            return
+        cut = w * self.layers / self.total
+        p.fillRect(QRectF(0, 3, cut, h - 13), QColor(theme.SIGNAL))
+        p.fillRect(QRectF(cut, 3, w - cut, h - 13), QColor(theme.PLAN))
+
+        if self.fits and self.fits < self.total:
+            # Where the device stops being able to hold any more.
+            x = w * self.fits / self.total
+            pen = QPen(QColor(theme.ALERT))
+            pen.setWidth(2)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(int(x), 1, int(x), h - 6)
+
+        p.setFont(mono_font(8))
+        p.setPen(QColor(theme.TEXT_DIM))
+        p.drawText(QRectF(2, h - 10, w / 2, 10), Qt.AlignLeft, "GPU")
+        p.drawText(QRectF(w / 2, h - 10, w / 2 - 2, 10), Qt.AlignRight, "system RAM")
+        p.end()
+
+
+class WheelGuard(QObject):
+    """Stops the mouse wheel changing values while scrolling a panel.
+
+    A spin box or drop-down under the pointer swallows the wheel and edits
+    itself, so scrolling down a settings page silently changes the first control
+    it passes over. Qt does this by default and it is a genuine hazard: the
+    value that changed is the one you were not looking at.
+
+    Unfocused controls therefore hand the wheel to the panel behind them. Click
+    one first and it scrolls normally.
+    """
+
+    VALUE_WIDGETS = (QAbstractSpinBox, QComboBox, QSlider)
+    TEXT_WIDGETS = (QTextEdit, QTextBrowser, QPlainTextEdit)
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if event.type() != QEvent.Wheel:
+            return False
+        widget = obj if isinstance(obj, QWidget) else None
+        if widget is None:
+            return False
+        # A wheel event arrives at the viewport, not the widget that owns it,
+        # so the ancestry is walked to find what is really being scrolled.
+        # Comparing against `viewport()` directly is unreliable: two PySide
+        # wrappers for the same C++ object are not necessarily the same Python
+        # object, so an identity test silently fails.
+        owner = widget
+        while owner is not None and not isinstance(
+                owner, self.VALUE_WIDGETS + self.TEXT_WIDGETS + (QAbstractScrollArea,)):
+            owner = owner.parentWidget()
+        if owner is None:
+            return False
+
+        if isinstance(owner, self.VALUE_WIDGETS):
+            # Click-only, always. Focus makes no difference: a value should
+            # never change because the pointer happened to be over it.
+            self._pass_upwards(owner, event)
+            return True
+        if isinstance(owner, self.TEXT_WIDGETS):
+            # Hand it to the page. Only where there is no page behind it does
+            # the box scroll itself, which is what keeps the transcript and the
+            # logs usable.
+            return self._pass_upwards(owner, event)
+        return False
+
+    @staticmethod
+    def _pass_upwards(widget, event) -> bool:
+        parent = widget.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QAbstractScrollArea):
+                QApplication.sendEvent(parent.viewport(), event)
+                return True
+            parent = parent.parentWidget()
+        return False
+
+
+def install_wheel_guard(app) -> WheelGuard:
+    """One filter for the whole application, rather than per widget.
+
+    Installed on the application object so it covers controls built later —
+    panels are created on demand, and a per-widget rule would have to be
+    remembered every time one is added.
+    """
+    guard = WheelGuard(app)
+    app.installEventFilter(guard)
+    return guard

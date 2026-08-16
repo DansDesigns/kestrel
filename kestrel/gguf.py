@@ -254,7 +254,8 @@ def estimate_vram_mb(info: GGUFInfo, n_ctx: int, cache_bits: int = 16) -> int:
 
 
 def layers_that_fit(info: GGUFInfo, vram_mb: int, n_ctx: int,
-                    cache_bits: int = 16, headroom_mb: int = 700) -> int:
+                    cache_bits: int = 16, headroom_mb: int = 700,
+                    integrated: bool = False, system_mb: int = 0) -> int:
     """How many layers can be offloaded to a GPU of this size.
 
     llama.cpp puts whatever it is told on the GPU and fails if that does not
@@ -275,6 +276,13 @@ def layers_that_fit(info: GGUFInfo, vram_mb: int, n_ctx: int,
     if cost <= 0:
         return 0
     budget = vram_mb - headroom_mb
+    if integrated:
+        # Offloading to an integrated GPU does not move data anywhere: the
+        # memory is the same physical RAM. The real constraint is therefore
+        # total system memory, less what the operating system and this
+        # application need, rather than a separate pool.
+        reserve = max(3072, int(system_mb * 0.18)) if system_mb else headroom_mb
+        budget = min(vram_mb, system_mb - reserve) if system_mb else vram_mb
     if budget <= 0:
         return 0
     return max(0, min(info.n_layer, int(budget / cost)))

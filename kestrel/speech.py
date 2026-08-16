@@ -331,7 +331,10 @@ class PiperStream:
         self.proc: subprocess.Popen | None = None
         self.player: subprocess.Popen | None = None
         cmd = [binary, "-m", str(model), "-c", str(config), "--output-raw",
-               "--length_scale", f"{length_scale:.2f}"]
+               "--length_scale", f"{length_scale:.2f}",
+               # Piper pads each utterance; the pause between sentences is
+               # supplied by the sentences themselves.
+               "--sentence_silence", "0.05"]
         self.sink = None
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE,
@@ -1016,11 +1019,53 @@ class Speech:
             return []
 
     # -- operations -----------------------------------------------------------
+    def piper_stream(self):
+        """A Piper process kept alive between replies.
+
+        Loading the voice model is most of the cost of a short utterance — a
+        medium voice takes seconds to load and a fraction of a second to speak.
+        Starting a process per reply pays that every time, which is why the
+        first words lag so far behind. One process for the session pays it once.
+        """
+        engine = self.tts_engine()
+        if engine is None or not hasattr(engine, "stream"):
+            return None
+        key = (self.cfg.speech.tts_voice, round(self.cfg.speech.tts_speed, 2))
+        stream = getattr(self, "_stream", None)
+        if stream is not None and getattr(self, "_stream_key", None) == key:
+            if stream.alive:
+                return stream
+            stream.close()
+        elif stream is not None:
+            stream.close()                     # voice or speed changed
+        self._stream = engine.stream(*key)
+        self._stream_key = key
+        return self._stream
+
+    def close_stream(self) -> None:
+        stream = getattr(self, "_stream", None)
+        if stream is not None:
+            stream.close()
+        self._stream = None
+        self._stream_key = None
+
     def speaker(self) -> "Speaker":
         return Speaker(self)
 
     def dictation(self, on_text, on_status=None) -> "Dictation":
         return Dictation(self, on_text, on_status)
+
+    def speak_now(self, text: str) -> bool:
+        """Speak immediately through the session process, if there is one."""
+        stream = self.piper_stream()
+        if stream is None:
+            return False
+        try:
+            stream.say(clean_for_speech(text, limit=600))
+            return True
+        except SpeechError:
+            self.close_stream()
+            return False
 
     def speak(self, text: str, blocking: bool = False) -> Path:
         text = clean_for_speech(text)
@@ -1233,16 +1278,14 @@ class Speaker:
             if self.on_error:
                 self.on_error("no speech engine available")
             return
-        stream = None
-        if hasattr(engine, "stream"):
-            stream = engine.stream(self.speech.cfg.speech.tts_voice,
-                                   self.speech.cfg.speech.tts_speed)
+        stream = self.speech.piper_stream()
         if stream is not None:
             self._stream = stream
             try:
                 self._run_streaming(stream)
             finally:
-                stream.close()
+                # Left running: closing it here would reload the voice model on
+                # the next reply, which is the delay this exists to remove.
                 self._stream = None
             return
         while not self._stop.is_set():
@@ -1302,10 +1345,11 @@ class Speaker:
         self.reset()
         if self._stream is not None:
             try:
-                self._stream.close()
+                self._stream.close()          # stop means silence now
             except Exception:
                 pass
             self._stream = None
+            self.speech.close_stream()
         if self._playing is not None:
             try:
                 self._playing.terminate()

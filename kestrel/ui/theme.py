@@ -117,6 +117,13 @@ QLabel#Eyebrow {{
     letter-spacing: 1.4px;
     text-transform: uppercase;
 }}
+QLabel#Section {{
+    color: {text};
+    font-size: {max(12, base_size)}px;
+    font-weight: 600;
+    margin-top: 10px;
+    margin-bottom: 2px;
+}}
 QLabel#Readout {{ font-family: {font_stack(mono_fonts())}; color: {amber};
                   font-size: {max(10, base_size - 1)}px; }}
 QLabel#Dim {{ color: {dim}; }}
@@ -132,8 +139,10 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
 }}
 /* Spin boxes and drop-downs lose their contents to the control furniture
    unless a floor is set: the arrows take a fixed width whatever is left. */
-QSpinBox, QDoubleSpinBox {{ min-width: 74px; }}
-QComboBox {{ min-width: 96px; }}
+/* Wide enough to read a value, narrow enough that three fit a side panel.
+   These floors are what decide whether a row of controls overflows. */
+QSpinBox, QDoubleSpinBox {{ min-width: 52px; }}
+QComboBox {{ min-width: 72px; }}
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 15px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: {amber}; }}
@@ -209,7 +218,16 @@ QGroupBox::title {{
     subcontrol-origin: margin; left: 10px; padding: 0 5px;
     color: {dim}; font-size: 11px; letter-spacing: 1px;
 }}
+QSlider::groove:horizontal {{
+    height: 4px; background: {panel_hi}; border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {amber}; border: none; width: 14px; height: 14px;
+    margin: -6px 0; border-radius: 7px;
+}}
+QSlider::handle:horizontal:hover {{ background: {hover}; }}
 QSplitter::handle {{ background: {line}; }}
+QSplitter::handle:hover {{ background: {dim}; }}
 QStatusBar {{ background: {panel}; border-top: 1px solid {line}; }}
 QProgressBar {{ background: {panel}; border: 1px solid {line}; border-radius: 4px; }}
 QProgressBar::chunk {{ background: {amber}; border-radius: 3px; }}

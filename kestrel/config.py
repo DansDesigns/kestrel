@@ -126,6 +126,8 @@ class Config:
     persona_level: int = -1           # -1 = follow the context profile
     todo_enabled: bool = True
     auto_plan: bool = True            # ask for a checklist before multi-step work
+    plan_driven: bool = True          # keep working until the checklist is closed
+    bell_on_finish: bool = True
     llama_backend: str = "auto"       # cpu | cuda | vulkan | hip | metal | sycl
     llama_with_rpc: bool = True       # build with the RPC backend for clustering
     auto_install_llama: bool = False

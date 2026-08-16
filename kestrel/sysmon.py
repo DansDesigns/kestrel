@@ -34,14 +34,49 @@ def _module(name: str) -> bool:
 HAVE_PSUTIL = _module("psutil")
 
 
+INTEGRATED_HINTS = ("iris", "uhd graphics", "hd graphics", "vega", "radeon graphics",
+                    "integrated", "apple")
+
+
 @dataclass
 class GpuSample:
     name: str = ""
     utilisation: float = -1.0      # percent, -1 when unknown
     mem_used_mb: int = 0
-    mem_total_mb: int = 0
+    mem_total_mb: int = 0          # dedicated, as the adapter reports it
+    shared_mb: int = 0             # system memory the GPU may borrow
     temperature: float = -1.0
     vendor: str = ""
+
+    @property
+    def integrated(self) -> bool:
+        """Integrated parts have no memory of their own worth the name.
+
+        Win32_VideoController reports AdapterRAM in a 32-bit field, so an Iris
+        Xe with 15 GB of shared system memory available to it comes back as
+        1 GB — and sizing an offload from that number puts nothing on the GPU.
+        """
+        low = self.name.lower()
+        return any(hint in low for hint in INTEGRATED_HINTS)
+
+    @property
+    def budget_mb(self) -> int:
+        """What can actually be allocated for a model."""
+        return max(self.shared_mb, self.mem_total_mb)
+
+    def memory_summary(self) -> str:
+        """Both figures, because the small one is the one that gets quoted.
+
+        An adapter reporting 1 GB alongside 15.9 GB of shared system memory is
+        not a 1 GB device for the purpose of loading a model, and showing only
+        the dedicated number is what makes it look like one.
+        """
+        bits = []
+        if self.mem_total_mb:
+            bits.append(f"{self.mem_total_mb / 1024:.1f} GB dedicated")
+        if self.shared_mb:
+            bits.append(f"{self.shared_mb / 1024:.1f} GB shared with system RAM")
+        return "  +  ".join(bits) or "memory unknown"
 
     @property
     def mem_percent(self) -> float:
@@ -50,6 +85,7 @@ class GpuSample:
 
 @dataclass
 class Sample:
+    gpus_scanned: bool = False     # False while the first scan is still running
     cpu_percent: float = 0.0
     per_core: list[float] = field(default_factory=list)
     mem_used_mb: int = 0
@@ -71,6 +107,7 @@ class Monitor:
         self._gpu_at = 0.0
         self._gpu_cache: list[GpuSample] = []
         self._gpu_busy = False
+        self._gpu_scanned = False
         self._gpu_tool = _find_gpu_tool()
         if HAVE_PSUTIL:
             try:
@@ -102,6 +139,7 @@ class Monitor:
             s.mem_used_mb, s.mem_total_mb = used, total
             s.source = "built-in"
         s.gpus = self.gpus()
+        s.gpus_scanned = self._gpu_scanned
         return s
 
     def _cpu_fallback(self) -> float:
@@ -203,6 +241,7 @@ class Monitor:
         except Exception:
             pass
         finally:
+            self._gpu_scanned = True
             self._gpu_busy = False
 
 
@@ -291,7 +330,26 @@ def _windows() -> list[GpuSample]:
         # attributed to the first one rather than reported for each.
         adapters[0].utilisation = utilisation
         adapters[0].mem_used_mb = used_mb
+    shared = _shared_budget_mb()
+    for adapter in adapters:
+        if adapter.integrated:
+            adapter.shared_mb = shared
     return adapters
+
+
+def _shared_budget_mb() -> int:
+    """How much system memory the graphics driver may hand to an integrated GPU.
+
+    Windows offers WDDM drivers up to half of physical RAM as shared memory,
+    which is where an integrated GPU's working set actually lives. That is the
+    figure to size an offload against, not the token amount the adapter claims
+    as dedicated.
+    """
+    try:
+        total = Monitor()._mem_fallback()[1]
+    except Exception:
+        total = 0
+    return int(total * 0.5) if total else 0
 
 
 def _vendor_of(name: str) -> str:
@@ -332,6 +390,8 @@ def _sysfs() -> list[GpuSample]:
         except OSError:
             pass
         sample = GpuSample(name=name, vendor=vendor)
+        if vendor == "intel" or "integrated" in name.lower():
+            sample.shared_mb = _shared_budget_mb()
         for clock in ("gt_act_freq_mhz", "gt_cur_freq_mhz"):
             try:
                 sample.temperature = -1.0

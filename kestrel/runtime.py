@@ -48,6 +48,7 @@ class Runtime:
     split_mode: str = ""
     main_gpu: int = 0
     tensor_split: str = ""
+    gpu_budget_mb: int = 0        # 0 = ask the device; otherwise an override
 
     rope_scaling: str = ""
     rope_freq_base: float = 0.0
@@ -278,12 +279,21 @@ def resolve_gpu_layers(cfg, model_path: str = "") -> int:
         gpus = sysmon.Monitor().gpus()
     except Exception:
         gpus = []
-    vram = max((g.mem_total_mb for g in gpus), default=0)
-    if not vram:
+    if not gpus:
         return 0                       # nothing detected: run on the CPU
+    best = max(gpus, key=lambda g: g.budget_mb)
+    vram = cfg.runtime.gpu_budget_mb or best.budget_mb
+    if not vram:
+        return 0
+    system = 0
+    try:
+        system = sysmon.Monitor().sample().mem_total_mb
+    except Exception:
+        system = 0
     ctx = cfg.runtime.ctx_size or 4096
     bits = 8 if cfg.runtime.cache_type_k.startswith("q8") else 16
-    return gguf.layers_that_fit(info, vram, ctx, bits)
+    return gguf.layers_that_fit(info, vram, ctx, bits,
+                                integrated=best.integrated, system_mb=system)
 
 
 def _basename(path: str) -> str:
