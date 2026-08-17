@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
 
 from .. import models as modelsmod
 from ..gguf import estimate_vram_mb
+from .. import attach as attachmod
 from .. import canvas as canvasmod
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
                 speech as speechmod, sysmon)
@@ -1024,9 +1025,13 @@ class PlanPanel(QWidget):
                     "Mark the selected step finished"),
                    ("To do", lambda: self.set_status(TODO),
                     "Put the selected step back to not started"),
+                   ("Move up", lambda: self.move_step(-1),
+                    "Move the selected step earlier"),
+                   ("Move down", lambda: self.move_step(1),
+                    "Move the selected step later"),
                    ("Remove", self.remove_step, "Delete the selected step"),
                    ("Clear all", self.clear_all, "Discard the whole plan")]
-        for pair in (buttons[:3], buttons[3:]):
+        for pair in (buttons[:3], buttons[3:6], buttons[6:]):
             row = QHBoxLayout()
             row.setSpacing(6)
             for text, slot, tip in pair:
@@ -1100,6 +1105,22 @@ class PlanPanel(QWidget):
             self.update_todo(self.todo)
             self.planEdited.emit()
             self.statusLine.emit(f"Added {added} step(s)")
+
+    def move_step(self, delta: int) -> None:
+        if self.todo is None:
+            return
+        item_id = self._selected()
+        if item_id is None:
+            return
+        if self.todo.move(int(item_id), delta):
+            self.update_todo(self.todo)
+            self.planEdited.emit()
+            # Keep the moved step selected, or the next press moves its neighbour.
+            for row in range(self.tree.topLevelItemCount()):
+                node = self.tree.topLevelItem(row)
+                if node.data(0, Qt.UserRole) == item_id:
+                    self.tree.setCurrentItem(node)
+                    break
 
     def set_status(self, status: str) -> None:
         """Move the selected step between to do, working and done.
@@ -2318,64 +2339,56 @@ class ToolsPanel(QWidget):
         self.detail.setPlainText("\n".join(lines))
 
 # ================================================================= canvas ===
-class CanvasPanel(QWidget):
-    """A scratch editor that the model can be pointed at.
+class CanvasSurface(QWidget):
+    """One editable buffer with its controls.
 
-    Working on code through a chat window means pasting it in, reading a reply,
-    and pasting it back. The canvas keeps one buffer that both sides can see:
-    you edit it, the model reviews it, and it saves to a real file in the
-    project when it is worth keeping.
+    Used twice: once for what the model writes, once for what you load. They
+    behave identically except that the model's is the one its tools write to.
     """
 
     statusLine = Signal(str)
-    reviewRequested = Signal(str, str)      # text, language
-    bufferChanged = Signal(str)             # the model wrote to the canvas
+    reviewRequested = Signal(str, str)
+    bufferChanged = Signal(str)
 
-    def __init__(self, cfg, parent=None):
+    def __init__(self, cfg, buffer, allow_import: bool = False, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self.buffer = buffer
         self.path: Path | None = None
         self._syncing = False
-        # The model writes through the shared buffer, which knows nothing about
-        # Qt; the signal carries the change onto the GUI thread.
         self.bufferChanged.connect(self._buffer_changed)
-        canvasmod.BUFFER.listen(lambda text: self.bufferChanged.emit(text))
+        buffer.listen(lambda text: self.bufferChanged.emit(text))
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setContentsMargins(0, 6, 0, 0)
         lay.setSpacing(6)
 
         row = QHBoxLayout()
-        self.filename = QLineEdit("scratch.py")
-        self.filename.setToolTip("Saved into the project folder unless you give "
-                                 "a full path")
+        self.filename = QLineEdit(buffer.name)
         row.addWidget(self.filename, 1)
         self.language = QComboBox()
         self.language.addItems(["python", "javascript", "shell", "markdown",
-                                "json", "yaml", "c", "cpp", "rust", "go",
-                                "html", "css", "sql", "other"])
-        self.language.setToolTip("Told to the model when it reviews the file")
+                                "json", "yaml", "text", "c", "cpp", "rust",
+                                "go", "html", "css", "sql", "other"])
         row.addWidget(self.language)
         lay.addLayout(row)
 
         self.editor = QPlainTextEdit()
         self.editor.setObjectName("Flush")
         self.editor.setFont(mono_font(10))
-        self.editor.setPlaceholderText(
-            "Write or paste code here.\n\n"
-            "Check asks the model to review exactly this text; Save writes it "
-            "into the project folder.")
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.editor.setTabStopDistance(4 * self.editor.fontMetrics()
-                                       .horizontalAdvance(" "))
+        self.editor.setPlaceholderText(
+            "Files you load appear here for the model to read."
+            if allow_import else
+            "The model writes code here. You can edit it, then Save.")
         self.editor.textChanged.connect(self._touched)
         lay.addWidget(self.editor, 1)
 
         first = QHBoxLayout()
-        for text, slot, tip in (
-                ("Check", self.review, "Ask the model to review this code"),
-                ("Save", self.save, "Write it into the project folder"),
-                ("Copy", self.copy, "Copy the whole buffer to the clipboard")):
+        actions = [("Check", self.review, "Ask the model to review this"),
+                   ("Save", self.save, "Write it into the project folder"),
+                   ("Copy", self.copy, "Copy the whole buffer")]
+        for text, slot, tip in actions:
             b = QPushButton(text)
             b.setToolTip(tip)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2384,10 +2397,11 @@ class CanvasPanel(QWidget):
         lay.addLayout(first)
 
         second = QHBoxLayout()
-        for text, slot, tip in (
-                ("Open…", self.open_file, "Load a file into the canvas"),
+        more = [("Import…" if allow_import else "Open…", self.open_file,
+                 "Load a file — text, code, Word, Excel, PDF or an image"),
                 ("Save as…", self.save_as, "Write it somewhere else"),
-                ("Clear", self.clear, "Empty the canvas")):
+                ("Clear", self.clear, "Empty this canvas")]
+        for text, slot, tip in more:
             b = QPushButton(text)
             b.setToolTip(tip)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2395,32 +2409,31 @@ class CanvasPanel(QWidget):
             second.addWidget(b)
         lay.addLayout(second)
 
-        self.note = QLabel("Not saved yet.")
+        self.note = QLabel("Empty.")
         self.note.setObjectName("Dim")
         self.note.setWordWrap(True)
         lay.addWidget(self.note)
 
-    # -- state ---------------------------------------------------------------
+    # -- state ------------------------------------------------------------
     def _buffer_changed(self, text: str) -> None:
         if text == self.editor.toPlainText():
             return
-        cursor = self.editor.textCursor().position()
+        at = self.editor.textCursor().position()
         self._syncing = True
         self.editor.setPlainText(text)
         self._syncing = False
-        moved = self.editor.textCursor()
-        moved.setPosition(min(cursor, len(text)))
-        self.editor.setTextCursor(moved)
-        self.statusLine.emit("The model wrote to the canvas")
+        cursor = self.editor.textCursor()
+        cursor.setPosition(min(at, len(text)))
+        self.editor.setTextCursor(cursor)
 
     def _touched(self) -> None:
         if not self._syncing:
-            canvasmod.BUFFER.set(self.editor.toPlainText(),
-                                 language=self.language.currentText(),
-                                 name=self.filename.text().strip())
+            self.buffer.set(self.editor.toPlainText(),
+                            language=self.language.currentText(),
+                            name=self.filename.text().strip())
         lines = self.editor.document().blockCount()
         chars = len(self.editor.toPlainText())
-        where = f"{self.path}" if self.path else "not saved yet"
+        where = str(self.path) if self.path else "not saved yet"
         self.note.setText(f"{lines} line(s), {chars:,} characters · {where}")
 
     def target(self) -> Path:
@@ -2430,11 +2443,11 @@ class CanvasPanel(QWidget):
             return candidate
         return Path(self.cfg.workspace).expanduser() / candidate
 
-    # -- actions -------------------------------------------------------------
+    # -- actions ----------------------------------------------------------
     def review(self) -> None:
         text = self.editor.toPlainText()
         if not text.strip():
-            self.statusLine.emit("The canvas is empty.")
+            self.statusLine.emit("Nothing here to check.")
             return
         self.reviewRequested.emit(text, self.language.currentText())
 
@@ -2451,34 +2464,45 @@ class CanvasPanel(QWidget):
         self.statusLine.emit(f"Saved {target}")
 
     def save_as(self) -> None:
-        chosen, _ = QFileDialog.getSaveFileName(self, "Save canvas as",
-                                                str(self.target()))
-        if not chosen:
-            return
-        self.filename.setText(chosen)
-        self.save()
+        chosen, _ = QFileDialog.getSaveFileName(self, "Save as", str(self.target()))
+        if chosen:
+            self.filename.setText(chosen)
+            self.save()
 
     def open_file(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
-            self, "Open into the canvas", str(Path(self.cfg.workspace).expanduser()))
+            self, "Load a file", str(Path(self.cfg.workspace).expanduser()),
+            "All files (*);;Text and code (*.txt *.md *.py *.js *.json *.csv);;"
+            "Documents (*.docx *.xlsx *.pptx *.pdf *.odt);;"
+            "Images (*.png *.jpg *.jpeg *.gif *.webp)")
         if not chosen:
             return
-        try:
-            self.editor.setPlainText(Path(chosen).read_text("utf-8", errors="replace"))
-        except OSError as e:
-            QMessageBox.warning(self, "Could not open", str(e))
+        item = attachmod.read(chosen)
+        if item.kind == "image":
+            QMessageBox.information(
+                self, "Image loaded",
+                f"{item.name} is {item.meta.get('dimensions', 'an image')}.\n\n"
+                "Its contents cannot be read by a text model, so a description "
+                "of it has been placed here instead.")
+            self.editor.setPlainText(item.block())
+        elif not item.text.strip():
+            QMessageBox.information(self, "Nothing to read",
+                                    item.note or "No readable text in that file.")
             return
-        self.filename.setText(chosen)
+        else:
+            self.editor.setPlainText(item.text)
+        self.filename.setText(item.name)
         self.path = Path(chosen)
         suffix = self.path.suffix.lstrip(".").lower()
-        known = {"py": "python", "js": "javascript", "sh": "shell", "md": "markdown",
-                 "json": "json", "yml": "yaml", "yaml": "yaml", "c": "c",
-                 "cpp": "cpp", "rs": "rust", "go": "go", "html": "html",
-                 "css": "css", "sql": "sql"}
-        if suffix in known:
-            self.language.setCurrentText(known[suffix])
+        known = {"py": "python", "js": "javascript", "sh": "shell",
+                 "md": "markdown", "json": "json", "yml": "yaml",
+                 "yaml": "yaml", "rs": "rust", "go": "go", "sql": "sql"}
+        self.language.setCurrentText(known.get(suffix, "text"))
         self._touched()
-        self.statusLine.emit(f"Opened {chosen}")
+        extra = f" — {item.note}" if item.note else ""
+        if item.truncated:
+            extra += " (truncated)"
+        self.statusLine.emit(f"Loaded {item.label}{extra}")
 
     def copy(self) -> None:
         text = self.editor.toPlainText()
@@ -2490,8 +2514,7 @@ class CanvasPanel(QWidget):
 
     def clear(self) -> None:
         if self.editor.toPlainText().strip() and QMessageBox.question(
-                self, "Clear the canvas", "Discard what is in the canvas?") \
-                != QMessageBox.Yes:
+                self, "Clear", "Discard what is here?") != QMessageBox.Yes:
             return
         self.editor.clear()
         self.path = None
@@ -2500,3 +2523,55 @@ class CanvasPanel(QWidget):
     def set_text(self, text: str) -> None:
         self.editor.setPlainText(text)
         self._touched()
+
+
+class CanvasPanel(QWidget):
+    """Two surfaces: what the model writes, and what you brought it.
+
+    They are separate because they have different owners. An import cannot
+    destroy what the model is midway through writing, and the model cannot
+    overwrite the file you loaded for it to look at — it can read that one
+    with canvas_read(source="user").
+    """
+
+    statusLine = Signal(str)
+    reviewRequested = Signal(str, str)
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setSpacing(6)
+
+        tabs = QTabWidget()
+        self.model_surface = CanvasSurface(cfg, canvasmod.BUFFER)
+        self.user_surface = CanvasSurface(cfg, canvasmod.USER_BUFFER,
+                                          allow_import=True)
+        tabs.addTab(self.model_surface, "Model")
+        tabs.addTab(self.user_surface, "Your files")
+        for surface in (self.model_surface, self.user_surface):
+            surface.statusLine.connect(self.statusLine.emit)
+            surface.reviewRequested.connect(self.reviewRequested.emit)
+        lay.addWidget(tabs, 1)
+        self.tabs = tabs
+
+    # kept so existing callers still work
+    @property
+    def editor(self):
+        return self.model_surface.editor
+
+    @property
+    def filename(self):
+        return self.model_surface.filename
+
+    def set_text(self, text: str) -> None:
+        self.model_surface.set_text(text)
+
+    def load_file(self, path: str) -> None:
+        """Put a file into the user surface and show it."""
+        item = attachmod.read(path)
+        self.user_surface.set_text(item.text or item.block())
+        self.user_surface.filename.setText(item.name)
+        self.tabs.setCurrentWidget(self.user_surface)
+        self.statusLine.emit(f"Loaded {item.label}")

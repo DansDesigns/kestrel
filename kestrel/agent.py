@@ -52,11 +52,75 @@ class Call:
     raw: str = ""
 
 
+def find_tool_blobs(text: str) -> list[tuple[int, int, str]]:
+    """Locate every <tool> block, as (start, end, json).
+
+    Scanned rather than matched by expression. A regular expression has to
+    decide where the JSON ends, and `{.*?}` ends at the first closing brace —
+    which is inside `arguments`, not after it. That only ever worked because a
+    trailing `</tool>` forced it wider, so a model that omitted the closing tag
+    had its calls rendered into the chat as text instead of being run.
+
+    Braces are counted instead, ignoring those inside strings, which handles a
+    missing closing tag, several blocks in one message, and a block cut short
+    by the token limit.
+    """
+    found: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"<tool>", text, re.IGNORECASE):
+        cursor = match.end()
+        while cursor < len(text) and text[cursor] in " \t\r\n`":
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            continue
+        depth, in_string, escaped = 0, False, False
+        end = -1
+        for i in range(cursor, len(text)):
+            ch = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end == -1:
+            continue                      # truncated: not a call yet
+        stop = end
+        tail = re.match(r"\s*(?:```)?\s*</tool>", text[end:], re.IGNORECASE)
+        if tail:
+            stop = end + tail.end()
+        found.append((match.start(), stop, text[cursor:end]))
+    return found
+
+
 def parse_text_calls(text: str) -> list[Call]:
     """Pull tool calls out of free text. Deliberately forgiving — small models
     put the JSON in fences, forget the closing tag, or add a stray comma."""
     out: list[Call] = []
     seen: set[str] = set()
+    for _start, _stop, blob in find_tool_blobs(text):
+        if blob in seen:
+            continue
+        obj = _loads(blob)
+        if isinstance(obj, dict) and obj.get("name"):
+            args = obj.get("arguments", obj.get("parameters", obj.get("args", {})))
+            if isinstance(args, str):
+                args = _loads(args) or {}
+            if isinstance(args, dict):
+                seen.add(blob)
+                out.append(Call(str(obj["name"]), args, raw=blob))
+    if out:
+        return out
     for rx in (TOOL_RE, FENCE_RE):
         for m in rx.finditer(text):
             blob = m.group(1)
@@ -167,7 +231,24 @@ def collapse_repeats(text: str) -> str:
 
 
 def strip_calls(text: str) -> str:
+    """Remove tool blocks from what the reader sees.
+
+    Spans come from the same scanner that finds the calls, so anything that ran
+    is also hidden — and a block that was cut short mid-JSON is hidden too,
+    rather than being left on screen as a wall of escaped quotes.
+    """
+    spans = find_tool_blobs(text)
+    if spans:
+        out, cursor = [], 0
+        for start, stop, _blob in spans:
+            out.append(text[cursor:start])
+            cursor = stop
+        out.append(text[cursor:])
+        text = "".join(out)
     text = TOOL_RE.sub("", text)
+    # A block truncated by the token limit leaves an opening tag behind.
+    text = re.sub(r"<tool>\s*\{.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"</?tool>", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 

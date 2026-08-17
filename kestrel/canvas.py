@@ -111,6 +111,13 @@ class CanvasBuffer:
                 continue
 
 
-# One buffer for the application. The canvas is a single shared surface by
-# design — two of them would raise the question of which one the model meant.
-BUFFER = CanvasBuffer()
+# Two surfaces, with different owners. The model writes to one; the person
+# loads files into the other. Keeping them apart means an import cannot destroy
+# what the model is midway through writing, and the model cannot overwrite the
+# file you brought in for it to look at.
+BUFFER = CanvasBuffer()          # the model's
+USER_BUFFER = CanvasBuffer()     # yours
+
+
+def surface(which: str = "model") -> CanvasBuffer:
+    return USER_BUFFER if str(which).lower().startswith("user") else BUFFER

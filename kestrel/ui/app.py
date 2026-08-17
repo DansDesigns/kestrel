@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import cluster as clustermod
+from .. import attach as attachmod
+from .. import sysmon
 from .. import downloads as dlmod
 from .. import sessions as sessionmod
 from .. import speech as speechmod
@@ -39,8 +41,8 @@ from .settings import SettingsDialog
 from .splash import Splash
 from .widgets import (ActivityTree, ChatView, ContextGauge,
                       BusyOverlay, Field, IconTabBar, LazyTab, Readout,
-                      TypingIndicator, clear_font_cache, install_wheel_guard,
-                      mono_font, stretch_columns)
+                      MonitorStrip, TypingIndicator, clear_font_cache,
+                      install_wheel_guard, mono_font, stretch_columns)
 
 
 # ------------------------------------------------------------------ worker --
@@ -628,6 +630,7 @@ class MainWindow(QWidget):
         self._loading_path = ""
         self.downloads = None
         self.downloads_window = None
+        self.attachments: list = []
         self._replies: dict[int, dict] = {}
         self._reply_no = 0
         self._pending_prompt = ""
@@ -652,6 +655,12 @@ class MainWindow(QWidget):
         self.chat = ChatView()
         self.activity = ActivityTree()
         self.gauge = ContextGauge()
+        self.monitor_strip = MonitorStrip(sysmon.Monitor())
+        self.monitor_timer = QTimer(self)
+        self.monitor_timer.setInterval(2000)
+        self.monitor_timer.timeout.connect(self.monitor_strip.refresh)
+        self.monitor_timer.start()
+        self.monitor_strip.refresh()
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setObjectName("Flush")
@@ -779,6 +788,13 @@ class MainWindow(QWidget):
         self.input.setPlaceholderText("Give Kestrel a task.   Enter to send, Shift+Enter for a new line.")
         self.input.setMaximumHeight(96)
         self.input.installEventFilter(self)
+        self.attach_bar = QLabel("")
+        self.attach_bar.setObjectName("Dim")
+        self.attach_bar.setWordWrap(True)
+        self.attach_bar.setCursor(Qt.PointingHandCursor)
+        self.attach_bar.mousePressEvent = lambda _e: self.clear_attachments()
+        self.attach_bar.hide()
+        clay.addWidget(self.attach_bar)
         clay.addWidget(self.input)
 
         # Only the two actions that belong to the message itself stay here; the
@@ -792,6 +808,14 @@ class MainWindow(QWidget):
         self.stop_btn.setObjectName("Danger")
         self.stop_btn.clicked.connect(self.stop)
         self.stop_btn.setEnabled(False)
+        self.attach_btn = QPushButton("+")
+        self.attach_btn.setObjectName("Chip")
+        self.attach_btn.setToolTip("Attach files — text, code, Word, Excel, "
+                                   "PDF or an image")
+        self.attach_btn.setMaximumWidth(34)
+        self.attach_btn.clicked.connect(self.attach_files)
+        row.addWidget(self.attach_btn)
+
         self.follow_btn = QPushButton("Following")
         self.follow_btn.setObjectName("Chip")
         self.follow_btn.setCheckable(True)
@@ -877,6 +901,9 @@ class MainWindow(QWidget):
             lambda i: self._tab_clicked("right", i))
         outer.addWidget(splitter, 1)
         outer.addWidget(self.gauge)
+        # Under the gauge, in space that was empty. The gauge itself is not
+        # moved or resized: it is the thing people actually watch.
+        outer.addWidget(self.monitor_strip)
 
     @staticmethod
     def _default_size() -> tuple[int, int]:
@@ -2157,6 +2184,11 @@ class MainWindow(QWidget):
         if not text or self.busy:
             return
         self.input.clear()
+        if self.attachments:
+            # Named in the message so the model knows what it was given, with
+            # the contents following.
+            text = (text + "\n\n" + attachmod.summarise(self.attachments)).strip()
+            self.clear_attachments()
         agent = self.worker.agent
         self._pending_prompt = text
         self._pending_mark = len(agent.history) if agent is not None else 0
@@ -2170,6 +2202,40 @@ class MainWindow(QWidget):
         self.stop_btn.setEnabled(True)
         self.continue_btn.setEnabled(False)
         self.requestSend.emit(text)
+
+    def attach_files(self) -> None:
+        """Read files into the next message.
+
+        The text goes with the message rather than into a file the model has to
+        be told to open: an attachment is context for what is being asked, not
+        a task in itself.
+        """
+        chosen, _ = QFileDialog.getOpenFileNames(
+            self, "Attach files", str(Path(self.cfg.workspace).expanduser()),
+            "All files (*);;Text and code (*.txt *.md *.py *.js *.json *.csv);;"
+            "Documents (*.docx *.xlsx *.pptx *.pdf *.odt);;"
+            "Images (*.png *.jpg *.jpeg *.gif *.webp)")
+        if not chosen:
+            return
+        for path in chosen:
+            item = attachmod.read(path)
+            self.attachments.append(item)
+            if item.kind == "image":
+                self._status(f"{item.name} attached — a text model cannot read "
+                             "its contents, only that it is there")
+        self._show_attachments()
+
+    def _show_attachments(self) -> None:
+        if not self.attachments:
+            self.attach_bar.hide()
+            return
+        names = ", ".join(a.label for a in self.attachments)
+        self.attach_bar.setText(f"Attached: {names}    (clear)")
+        self.attach_bar.show()
+
+    def clear_attachments(self) -> None:
+        self.attachments = []
+        self._show_attachments()
 
     def continue_task(self) -> None:
         """Resume: the open step if there is one, otherwise where it left off.

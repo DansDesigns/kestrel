@@ -1482,3 +1482,73 @@ def swatch(colour: str, size: int = 14) -> QIcon:
     painter.drawRect(0, 0, size - 1, size - 1)
     painter.end()
     return QIcon(pixmap)
+
+
+class MonitorStrip(QWidget):
+    """A one-line reading of the machine, under the context gauge.
+
+    The system tab shows this properly; this is for the glance you take while
+    something is running, without leaving whatever tab you are on. It uses the
+    whitespace beside the gauge rather than taking any room from it.
+    """
+
+    def __init__(self, monitor, parent=None):
+        super().__init__(parent)
+        self.monitor = monitor
+        self.setFixedHeight(16)
+        self._text = ""
+        self._parts: list[tuple[str, str, float]] = []   # label, colour, fraction
+
+    def refresh(self) -> None:
+        try:
+            sample = self.monitor.sample()
+        except Exception:
+            return
+        parts = [("cpu", theme.SIGNAL, sample.cpu_percent / 100.0,
+                  f"{sample.cpu_percent:.0f}%")]
+        if sample.mem_total_mb:
+            share = sample.mem_used_mb / sample.mem_total_mb
+            parts.append(("ram", theme.PLAN, share,
+                          f"{sample.mem_used_mb / 1024:.1f}/"
+                          f"{sample.mem_total_mb / 1024:.0f} GB"))
+        for gpu in sample.gpus[:1]:
+            if gpu.utilisation >= 0:
+                parts.append(("gpu", theme.VIOLET, gpu.utilisation / 100.0,
+                              f"{gpu.utilisation:.0f}%"))
+            budget = gpu.budget_mb
+            if budget and gpu.mem_used_mb:
+                parts.append(("vram", theme.AMBER, gpu.mem_used_mb / budget,
+                              f"{gpu.mem_used_mb / 1024:.1f}/"
+                              f"{budget / 1024:.0f} GB"))
+            if gpu.temperature >= 0:
+                parts.append(("gpu°", theme.ALERT, min(1.0, gpu.temperature / 100),
+                              f"{gpu.temperature:.0f}°C"))
+        if sample.cpu_temp >= 0:
+            parts.append(("cpu°", theme.ALERT, min(1.0, sample.cpu_temp / 100),
+                          f"{sample.cpu_temp:.0f}°C"))
+        self._parts = parts
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        if not self._parts:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(mono_font(8))
+        metrics = p.fontMetrics()
+        x = 6.0
+        for label, colour, fraction, value in self._parts:
+            text = f"{label} {value}"
+            width = metrics.horizontalAdvance(text) + 10
+            bar = max(0.0, min(1.0, fraction))
+            # A quiet bar behind the number: the figure is what is read, the
+            # fill is for noticing something without reading anything.
+            p.setPen(Qt.NoPen)
+            p.fillRect(QRectF(x, 11, width - 8, 3), QColor(theme.PANEL_HI))
+            p.fillRect(QRectF(x, 11, (width - 8) * bar, 3), QColor(colour))
+            p.setPen(QColor(theme.TEXT_DIM))
+            p.drawText(QRectF(x, -1, width, 12), Qt.AlignLeft | Qt.AlignVCenter, text)
+            x += width + 8
+            if x > self.width():
+                break
+        p.end()

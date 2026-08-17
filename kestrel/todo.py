@@ -168,6 +168,26 @@ class TodoList:
         self._touch()
         return item
 
+    def move(self, item_id: int, delta: int) -> bool:
+        """Shift a step up or down the list.
+
+        Order is what the model works through, so being able to change it is
+        how a plan gets corrected without rewriting it. Ids follow the step
+        rather than the position: renumbering would break every reference the
+        model has already made.
+        """
+        index = next((i for i, item in enumerate(self.items)
+                      if item.id == item_id), -1)
+        if index < 0:
+            return False
+        target = index + delta
+        if target < 0 or target >= len(self.items):
+            return False
+        self.items[index], self.items[target] = self.items[target], self.items[index]
+        self._touch()
+        self.save()
+        return True
+
     def remove(self, item_id: int) -> bool:
         """Drop a step. Ids are deliberately not renumbered: the model refers to
         them by number, and shifting them under it causes it to close the wrong

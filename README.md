@@ -294,6 +294,23 @@ between states. The model sets these as it goes; setting them yourself matters
 when it gets one wrong, or when the work happened outside Kestrel. Each change
 rewrites PLAN.md.
 
+**The canvas** has two tabs. **Model** is what the model writes to; **Your
+files** is what you load into it — text, code, Word, Excel, PowerPoint, PDF,
+OpenDocument or an image. They are separate because they have different owners:
+an import cannot destroy what the model is midway through writing, and the model
+cannot overwrite the file you loaded for it to look at. It reads that one with
+`canvas_read(source="user")`.
+
+Office formats are read without needing a library installed — a `.docx` is a zip
+of XML, and stripping the tags gives the words in order, which is what a model
+needs. Where a proper library is present it is used instead. An image cannot be
+read by a text model, so what is recorded is its format and dimensions, and you
+are told so plainly rather than left wondering why it was ignored.
+
+**+ beside the composer** attaches files to the next message, with the same
+readers. The text travels with the message rather than becoming a task in
+itself.
+
 **The canvas** is a shared editor on the right rail — shared because the model
 writes to it too. A model asked to produce code in a chat reply has to reproduce
 the whole thing every time it changes a line, which is slow, expensive in
@@ -1102,6 +1119,11 @@ counters Task Manager uses, covering Intel and AMD integrated parts, and on
 Linux from `/sys/class/drm`. Sampling happens on a background thread: reading
 those counters spawns a process and takes the better part of a second, which is
 not something to make the interface wait for.
+
+**The bottom strip** shows CPU, RAM, GPU, video memory and temperatures under
+the context gauge, in space that was empty — the gauge itself is neither moved
+nor resized. CPU temperature comes from the platform where it offers one; Windows
+generally does not without a driver, so it is left out there rather than guessed.
 
 **Contrast.** Dimmed text sits at better than 6:1 against its background in both
 palettes, and a selected row has its own background *and* its own text colour —

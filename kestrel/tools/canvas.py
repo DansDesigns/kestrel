@@ -7,13 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..canvas import BUFFER
+from ..canvas import BUFFER, surface
 from . import DANGER_SAFE, DANGER_WRITE, Param, Registry, Tool, ToolResult
 
 
 def register(reg: Registry) -> None:
-    def canvas_read(start: int = 1, end: int = 0) -> ToolResult:
-        return ToolResult(BUFFER.numbered(int(start or 1), int(end or 0)))
+    def canvas_read(start: int = 1, end: int = 0, source: str = "model") -> ToolResult:
+        return ToolResult(surface(source).numbered(int(start or 1), int(end or 0)))
 
     def canvas_write(text: str, language: str = "") -> ToolResult:
         BUFFER.set(text, language=language)
@@ -52,10 +52,13 @@ def register(reg: Registry) -> None:
                         "the canvas, then save it here."))
     reg.add(Tool("canvas_read", "Read the shared canvas, with line numbers.",
                  [Param("start", "integer", "First line, default 1."),
-                  Param("end", "integer", "Last line, default the end.")],
+                  Param("end", "integer", "Last line, default the end."),
+                  Param("source", "string",
+                        "model (your canvas) or user (the file they loaded).")],
                  canvas_read, DANGER_SAFE,
                  detail="Read before editing so your line numbers match what is "
-                        "actually there."))
+                        "actually there. source=user reads the file the person "
+                        "loaded, which you can read but not overwrite."))
     reg.add(Tool("canvas_write", "Replace the whole canvas with this text.",
                  [Param("text", "string", "The complete new contents.",
                         required=True),

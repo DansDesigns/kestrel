@@ -34,8 +34,16 @@ def _module(name: str) -> bool:
 HAVE_PSUTIL = _module("psutil")
 
 
-INTEGRATED_HINTS = ("iris", "uhd graphics", "hd graphics", "vega", "radeon graphics",
-                    "integrated", "apple")
+INTEGRATED_HINTS = ("iris", "uhd", "hd graphics", "integrated", "apple",
+                    "i915", "intel", "radeon graphics", "vega ", "gfx",
+                    "adreno", "mali", "llvmpipe")
+# Only these are integrated: a Vega 56/64 is a card with its own memory, and
+# treating it as integrated would size an offload against system RAM it cannot
+# reach. The trailing space in "vega " matches "Vega 8 Graphics" while leaving
+# "RX Vega 64" alone.
+DISCRETE_HINTS = ("rx vega", "radeon rx", "radeon pro", "geforce", "quadro",
+                  "tesla", "radeon vii", "arc(tm)", "arc a", " arc ", "battlemage",
+                  "firepro", "instinct", "titan")
 
 
 @dataclass
@@ -47,6 +55,7 @@ class GpuSample:
     shared_mb: int = 0             # system memory the GPU may borrow
     temperature: float = -1.0
     vendor: str = ""
+    meta_note: str = ""
 
     @property
     def integrated(self) -> bool:
@@ -57,14 +66,25 @@ class GpuSample:
         1 GB — and sizing an offload from that number puts nothing on the GPU.
         """
         low = self.name.lower()
+        if any(hint in low for hint in DISCRETE_HINTS):
+            return False
         return any(hint in low for hint in INTEGRATED_HINTS)
+
+    # Win32_VideoController.AdapterRAM is a 32-bit field, so anything with more
+    # than 4 GB reports exactly 4 GB. An 8 GB card looking like a 4 GB one is
+    # the same bug as a 24 GB one looking like 4 GB.
+    CAPPED_MB = 4096
+
+    @property
+    def capped(self) -> bool:
+        return self.mem_total_mb in (self.CAPPED_MB, self.CAPPED_MB - 1)
 
     @property
     def budget_mb(self) -> int:
         """What can actually be allocated for a model."""
         return max(self.shared_mb, self.mem_total_mb)
 
-    def memory_summary(self) -> str:
+    def memory_summary(self) -> str:  # noqa: D401
         """Both figures, because the small one is the one that gets quoted.
 
         An adapter reporting 1 GB alongside 15.9 GB of shared system memory is
@@ -73,7 +93,8 @@ class GpuSample:
         """
         bits = []
         if self.mem_total_mb:
-            bits.append(f"{self.mem_total_mb / 1024:.1f} GB dedicated")
+            more = " (at least — the driver caps its report here)" if self.capped else ""
+            bits.append(f"{self.mem_total_mb / 1024:.1f} GB dedicated{more}")
         if self.shared_mb:
             bits.append(f"{self.shared_mb / 1024:.1f} GB shared with system RAM")
         return "  +  ".join(bits) or "memory unknown"
@@ -86,6 +107,7 @@ class GpuSample:
 @dataclass
 class Sample:
     gpus_scanned: bool = False     # False while the first scan is still running
+    cpu_temp: float = -1.0         # -1 when the platform will not say
     cpu_percent: float = 0.0
     per_core: list[float] = field(default_factory=list)
     mem_used_mb: int = 0
@@ -140,6 +162,7 @@ class Monitor:
             s.source = "built-in"
         s.gpus = self.gpus()
         s.gpus_scanned = self._gpu_scanned
+        s.cpu_temp = _cpu_temperature()
         return s
 
     def _cpu_fallback(self) -> float:
@@ -331,10 +354,82 @@ def _windows() -> list[GpuSample]:
         adapters[0].utilisation = utilisation
         adapters[0].mem_used_mb = used_mb
     shared = _shared_budget_mb()
+    real = _windows_dedicated_mb()
     for adapter in adapters:
+        # The registry figure wins whenever it is larger: it is the one that
+        # is not truncated at 4 GB.
+        exact = real.get(adapter.name.strip().lower())
+        if exact and exact > adapter.mem_total_mb:
+            adapter.mem_total_mb = exact
         if adapter.integrated:
             adapter.shared_mb = shared
+        elif adapter.capped and not exact:
+            # A discrete card still reporting exactly 4 GB is almost certainly
+            # larger; say so rather than sizing an offload against a wrong number.
+            adapter.meta_note = "reported 4 GB; the driver may have more"
     return adapters
+
+
+def _windows_dedicated_mb() -> dict:
+    """Real VRAM per adapter, from the driver's own registry entry.
+
+    `qwMemorySize` is a 64-bit value and is what Task Manager reports; the WMI
+    field everything else reads is 32 bits and therefore useless above 4 GB.
+    """
+    if os.name != "nt":
+        return {}
+    key = ("HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+           "{4d36e968-e325-11ce-bfc1-08002be10318}")
+    script = (
+        f"Get-ChildItem '{key}' -EA SilentlyContinue | ForEach-Object {{ "
+        "$p = Get-ItemProperty $_.PSPath -EA SilentlyContinue; "
+        "if ($p.'HardwareInformation.qwMemorySize') { "
+        "Write-Output ('VRAM|' + $p.DriverDesc + '|' + "
+        "$p.'HardwareInformation.qwMemorySize') } }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                             capture_output=True, text=True, timeout=8,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return {}
+    found = {}
+    for line in (out.stdout or "").splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 3 and parts[0] == "VRAM":
+            try:
+                found[parts[1].strip().lower()] = int(parts[2]) // (1024 * 1024)
+            except ValueError:
+                continue
+    return found
+
+
+def _cpu_temperature() -> float:
+    """CPU temperature, if the machine will give one.
+
+    Linux exposes it through psutil or /sys; Windows generally does not without
+    a driver, so it is simply left out there rather than guessed at.
+    """
+    try:
+        import psutil
+        readings = psutil.sensors_temperatures()          # type: ignore[attr-defined]
+    except Exception:
+        readings = {}
+    for key in ("coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"):
+        entries = readings.get(key) or []
+        for entry in entries:
+            if entry.current and entry.current > 0:
+                return float(entry.current)
+    for entry in [e for group in readings.values() for e in group]:
+        if entry.current and 20 < entry.current < 120:
+            return float(entry.current)
+    try:
+        for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+            kind = (zone / "type").read_text().strip().lower()
+            if "cpu" in kind or "x86" in kind or "soc" in kind:
+                return int((zone / "temp").read_text().strip()) / 1000.0
+    except (OSError, ValueError):
+        pass
+    return -1.0
 
 
 def _shared_budget_mb() -> int:
