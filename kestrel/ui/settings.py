@@ -14,6 +14,7 @@ import threading
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QMessageBox,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton,
                                QSpinBox, QTabWidget, QVBoxLayout, QWidget)
@@ -45,10 +46,14 @@ def _row(*widgets) -> QWidget:
 
 class SettingsDialog(QDialog):
     _update_result = Signal(str, bool)
+    _update_line = Signal(str)
+    _update_done = Signal(bool)
 
     def __init__(self, cfg: Config, parent=None):
         super().__init__(parent)
         self._update_result.connect(self._show_update)
+        self._update_line.connect(lambda line: self.update_log.appendPlainText(line))
+        self._update_done.connect(self._update_finished)
         self.cfg = cfg
         self.appearance_changed = False
         self._notes: list[str] = []
@@ -307,20 +312,29 @@ class SettingsDialog(QDialog):
         check.clicked.connect(self.check_updates)
         lay.addWidget(check)
 
+        self.install_btn = QPushButton("Install the update")
+        self.install_btn.setObjectName("Primary")
+        self.install_btn.clicked.connect(self.install_update)
+        self.install_btn.hide()
+        lay.addWidget(self.install_btn)
+
+        self.update_log = QPlainTextEdit()
+        self.update_log.setReadOnly(True)
+        self.update_log.setMaximumHeight(120)
+        self.update_log.hide()
+        lay.addWidget(self.update_log)
+
         self.repo_link = QLabel(
             f'<a href="{update.RELEASES}" style="color:#E8A33D;">{update.RELEASES}</a>')
         self.repo_link.setOpenExternalLinks(True)
         self.repo_link.setWordWrap(True)
         lay.addWidget(self.repo_link)
 
-        note = QLabel("Kestrel does not update itself. It compares the version "
-                      "published in the repository with the one installed and "
-                      "tells you; replacing files you may have edited is not "
-                      "something an application should do unasked.\n\n"
-                      "To update a git checkout:  git pull\n"
-                      "Otherwise download the latest copy and run the installer "
-                      "again — settings, memory and conversations are kept "
-                      "outside the program folder.")
+        note = QLabel("Updating happens here rather than on a web page. A git "
+                      "checkout is pulled; any other copy is replaced from the "
+                      "published archive, keeping a backup of what was there.\n\n"
+                      "Settings, memory, conversations and projects live outside "
+                      "the program folder and are never touched.")
         note.setWordWrap(True)
         note.setObjectName("Dim")
         lay.addWidget(note)
@@ -340,6 +354,44 @@ class SettingsDialog(QDialog):
         self.update_status.setText(summary)
         colour = "#E8A33D" if available else ""
         self.update_status.setStyleSheet(f"color: {colour};" if colour else "")
+        self.install_btn.setVisible(available)
+        if available:
+            self.install_btn.setText(
+                "Install the update" + ("  (git pull)" if update.is_git_checkout()
+                                        else ""))
+
+    def install_update(self) -> None:
+        if QMessageBox.question(
+                self, "Install the update",
+                "Replace this installation with the published version?\n\n"
+                "Settings, memory, conversations and projects are kept — they "
+                "live outside the program folder.\n\n"
+                "Kestrel must be restarted afterwards.") != QMessageBox.Yes:
+            return
+        self.install_btn.setEnabled(False)
+        self.update_log.clear()
+        self.update_log.show()
+
+        def say(line: str) -> None:
+            self._update_line.emit(line)
+
+        def work():
+            try:
+                ok, message = update.apply(say)
+            except Exception as e:
+                ok, message = False, str(e)
+            self._update_result.emit(message, False)
+            self._update_line.emit(message)
+            self._update_done.emit(ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_finished(self, ok: bool) -> None:
+        self.install_btn.setEnabled(True)
+        self.install_btn.setVisible(not ok)
+        if ok:
+            QMessageBox.information(self, "Update installed",
+                                    "Restart Kestrel to run the new version.")
 
     # -- helpers --------------------------------------------------------------
     def _pick_file(self, target: QLineEdit, title: str,

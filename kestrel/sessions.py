@@ -30,14 +30,54 @@ def slug(name: str) -> str:
 
 
 # ------------------------------------------------------------- projects ----
+# "2026-08-16 telemetry-rewrite" — the date first so a plain alphabetical
+# listing in any file manager is also chronological.
+PROJECT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[ _-]+(.*)$")
+PLAN_FILE = "PLAN.md"
+
+
 @dataclass
 class Project:
     name: str
     path: Path
 
     @property
+    def created(self) -> str:
+        """The date in the folder name, or the folder's own date."""
+        match = PROJECT_RE.match(self.name)
+        if match:
+            return match.group(1)
+        try:
+            return time.strftime("%Y-%m-%d", time.localtime(self.path.stat().st_ctime))
+        except OSError:
+            return ""
+
+    @property
     def display(self) -> str:
-        return self.name
+        match = PROJECT_RE.match(self.name)
+        return (match.group(2) or self.name) if match else self.name
+
+    @property
+    def plan_path(self) -> Path:
+        return self.path / PLAN_FILE
+
+    def plan_summary(self) -> str:
+        """Read the progress line out of the plan file, without parsing it all.
+
+        The file is written for people; this only needs the count, and reading
+        the first few lines is enough for that.
+        """
+        try:
+            with open(self.plan_path, "r", encoding="utf-8") as handle:
+                for _ in range(6):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    if " done" in line and "·" in line:
+                        return line.split("·")[-1].strip()
+        except OSError:
+            pass
+        return ""
 
     def session_dir(self) -> Path:
         return self.path / ".kestrel" / "sessions"
@@ -116,23 +156,37 @@ def list_projects(workspace_root: str | Path) -> list[Project]:
     root = projects_root(workspace_root)
     out = []
     try:
-        for child in sorted(root.iterdir()):
+        for child in root.iterdir():
             if (child.is_dir() and not child.name.startswith(".")
                     and child.name.lower() not in SYSTEM_DIRS):
                 out.append(Project(name=child.name, path=child))
     except (OSError, PermissionError):
         pass
+    # Newest first: the project being worked on is nearly always a recent one.
+    out.sort(key=lambda p: (p.created, p.name), reverse=True)
     return out
 
 
-def create_project(workspace_root: str | Path, name: str) -> Project:
+def create_project(workspace_root: str | Path, name: str,
+                   when: str = "") -> Project:
+    """Make a dated project folder.
+
+    The date leads the name so that projects sort chronologically wherever they
+    are listed — in Kestrel, in Explorer, in a terminal — without anything
+    needing to read metadata.
+    """
     root = projects_root(workspace_root)
-    folder = root / slug(name)
+    stamp = when or time.strftime("%Y-%m-%d")
+    folder = root / f"{stamp} {slug(name)}"
+    suffix = 2
+    while folder.exists() and any(folder.iterdir()):
+        folder = root / f"{stamp} {slug(name)}-{suffix}"
+        suffix += 1
     folder.mkdir(parents=True, exist_ok=True)
     (folder / ".kestrel").mkdir(exist_ok=True)
     readme = folder / "README.md"
     if not readme.exists():
-        readme.write_text(f"# {name}\n\nCreated {time.strftime('%Y-%m-%d')}.\n", "utf-8")
+        readme.write_text(f"# {name}\n\nCreated {stamp}.\n", "utf-8")
     return Project(name=folder.name, path=folder)
 
 

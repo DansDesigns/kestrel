@@ -25,6 +25,7 @@ from .context import Budget, ContextManager, budget_for
 from .llm import ChatResult, LlamaClient, LLMError
 from .memory import CAPTURE_PROMPT, MemoryStore, parse_capture
 from .tokens import TokenCounter
+from .thoughts import ThoughtLog
 from .todo import TodoList
 from .tools import Registry, ToolResult
 
@@ -95,6 +96,45 @@ def _loads(blob: str) -> Any:
         return None
 
 
+# Conversational framing, wherever in the line it starts. Anchoring only at the
+# end missed "Sure! Here's the plan:" and "Let me know if you'd like changes".
+PLAN_NOISE = re.compile(
+    r"^\s*(sure|certainly|of course|okay|ok|alright|here(?:'s| is| are)|"
+    r"i will|i'll|let me know|let me|feel free|below (?:is|are)|"
+    r"the plan|this plan|plan|steps?|breakdown|hope this|anything else)\b",
+    re.I)
+PLAN_BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|step\s*\d+[:.)]?)\s*", re.I)
+
+
+def clean_plan_lines(text: str) -> list[str]:
+    """Turn whatever the model wrote into a list of steps.
+
+    Models introduce a list before giving it, number it in several styles, and
+    close with a summary. Insisting on one bare step per line throws away a
+    perfectly good plan because of its packaging, which is why some models
+    appeared not to plan at all.
+    """
+    out: list[str] = []
+    for raw in str(text or "").splitlines():
+        line = raw.strip().strip("`")
+        if not line or PLAN_NOISE.match(line):
+            continue
+        if line.startswith("#") or line.startswith(">"):
+            continue
+        line = PLAN_BULLET.sub("", line).strip()
+        line = re.sub(r"^\[[ x>!]\]\s*", "", line)      # a checkbox, if given
+        line = line.strip(" .;")
+        if len(line) < 3 or len(line.split()) > 40:
+            continue
+        # A step is an instruction, not a remark about the plan.
+        if PLAN_NOISE.match(line) or line.endswith((":", "?")):
+            continue
+        if line.lower() in {s.lower() for s in out}:
+            continue
+        out.append(line[:160])
+    return out[:12]
+
+
 def collapse_repeats(text: str) -> str:
     """Fold immediately repeated lines or sentences into one.
 
@@ -142,6 +182,7 @@ class Agent:
         self.cancelled = threading.Event()
         self.paused = threading.Event()
         self._recent: list[str] = []       # signatures, for loop detection
+        self.thoughts = ThoughtLog()       # replaced with the project's log on prepare
         self._prose_streak = 0
         self.skills: list[skillmod.Skill] = []
         self.registry: Registry | None = None
@@ -191,6 +232,7 @@ class Agent:
             self.dialect = want
 
         self.todo = TodoList.load(self.cfg.workspace_path())
+        self.thoughts = ThoughtLog.load(self.cfg.workspace_path())
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         self.registry = build_registry(self.cfg, lambda: self.skills,
@@ -376,9 +418,14 @@ class Agent:
         self._turn_log = [f"user: {user_text}"]
         self._recent = []
         self._prose_streak = 0
+        self.thoughts.start_task(user_text)
         briefing = self._plan_briefing()
-        if briefing:
-            self.history.append({"role": "user", "content": briefing})
+        thoughts = self._thought_block()
+        opening = "\n\n".join(x for x in (briefing, thoughts) if x)
+        if opening:
+            # A dozen lines of what has already been considered, for a model
+            # whose own trace was discarded after the turn that produced it.
+            self.history.append({"role": "user", "content": opening})
         self._finish_blocks = 0
         memory_block = self._memory_block(user_text)
         self._autoplan(user_text)
@@ -427,6 +474,7 @@ class Agent:
             if trace:
                 self.emit("thinking_done", {"text": trace,
                                             "tokens": self.counter.count(trace)})
+                self._remember_thought(trace, step)
                 if reasoning.truncated(trace, content, res.finish_reason):
                     msg = ("The model spent its entire generation budget thinking and "
                            "produced no answer. Cap the trace with a thinking budget, "
@@ -590,6 +638,18 @@ class Agent:
         return f"\n[plan {done}/{total}{where}]"
 
     # -- planning --------------------------------------------------------------
+    def _remember_thought(self, trace: str, step: int) -> None:
+        """Keep one line of each reasoning trace, and notice a loop."""
+        if not trace.strip():
+            return
+        fresh, seen = self.thoughts.add(step, trace)
+        if not fresh and seen >= 3:
+            self.emit("thought_loop", {"count": seen,
+                                       "text": self.thoughts.looping()})
+
+    def _thought_block(self) -> str:
+        return self.thoughts.block()
+
     def _plan_briefing(self) -> str:
         """Aim the model at a checklist it did not write.
 
@@ -636,9 +696,8 @@ class Agent:
                 return
             complete, _, rest = text.rpartition("\n")
             buffer[:] = [rest]
-            for line in complete.splitlines():
-                if line.strip():
-                    drafted.append(line)
+            for line in clean_plan_lines(complete):
+                drafted.append(line)
             if drafted:
                 self.todo.set_plan(drafted, title=title)
                 self.emit("todo", {"todo": self.todo})
@@ -653,7 +712,7 @@ class Agent:
             self.todo.clear()
             return
         visible = collapse_repeats(reasoning.split(res.content)[0])
-        steps = [ln for ln in visible.splitlines() if ln.strip()]
+        steps = clean_plan_lines(visible)
         if len(steps) < 2:
             self.todo.clear()   # one step is not a plan; do not clutter the prompt
             self.emit("todo", {"todo": self.todo})

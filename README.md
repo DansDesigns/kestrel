@@ -275,6 +275,16 @@ evidence. Each turn opens with a line naming the step to start from. Verified:
 a three-step plan typed in by hand survived a turn intact, was followed in
 order, and the model's own alternative plan was never substituted.
 
+**Setting a step by hand.** *Working*, *Done* and *To do* move the selected step
+between states. The model sets these as it goes; setting them yourself matters
+when it gets one wrong, or when the work happened outside Kestrel. Each change
+rewrites PLAN.md.
+
+**The canvas** is a scratch editor in its own tab. Working on code through a chat
+window means pasting it in, reading a reply and pasting it back; the canvas keeps
+one buffer both sides can see. **Check** sends exactly what is on screen for
+review, **Save** writes it into the project folder, and **Copy** takes the lot.
+
 **Writing a plan yourself.** *Add step…* takes one step per line. A model that
 will not decompose a task — small ones often will not — should not leave the
 checklist unusable, and hand-written steps behave exactly like generated ones.
@@ -379,6 +389,15 @@ function.
 
 ### 6.5 Scope and inspection
 
+Recall demands more than a shared word. A single matching term only counts when
+it is distinctive rather than one appearing in half the store — otherwise a note
+about the clock surfaces on every prompt that happens to mention time. What
+survives that is then measured against the best match and anything scoring below
+45% of it is dropped, because a weak match propped up by recency and importance
+is still weak and costs context on every turn. **Clean up** in the Memory tab
+deletes entries the durability filter would refuse today, for stores that predate
+it.
+
 Recall requires a genuine match: a memory has to contain something that was
 actually asked about, not merely rank highest among poor candidates. Ranking
 alone will happily return the least-bad memory in the store, which is how
@@ -465,8 +484,34 @@ Controls cover mode (`auto`, `on`, `off`), a token budget, the server's
 
 ## 8a. Projects and conversations
 
-A **workspace** is a folder with its own files, memory scope, checklist and
-saved conversations. Switching folder switches all four together — an agent that
+A **project** is a folder named `YYYY-MM-DD name` inside the workspace root, so
+projects sort chronologically wherever they are listed — in Kestrel, in Explorer,
+in a terminal — without anything needing to read metadata. Each holds its own
+files, memory scope, checklist and saved conversations.
+
+Two files are kept in the project folder for people rather than for the program:
+
+**PLAN.md** — the checklist as a document, rewritten on every change:
+
+```markdown
+# write the cluster split into my notes
+
+Updated 2026-08-16 23:10 · 2 of 3 done
+
+- [x] Read the existing notes file
+- [x] Write the cluster split into notes.md
+- [ ] Verify the file reads back
+```
+
+**THOUGHTS.md** — one line of reasoning per step. A reasoning trace is discarded
+after the turn that produced it, which is why a small model can think the same
+thought at step 2, step 5 and step 9. A dozen summarised lines cost a few dozen
+tokens and answer the question that actually prevents it: what have I already
+considered? Repetitions are counted rather than appended, and a thought reached
+three times is marked as such to the model and in the file.
+
+Both are plain markdown, so the state of a piece of work is legible without
+Kestrel running. Switching folder switches all four together — an agent that
 recalls one project's decisions while working on another is worse than one that
 recalls nothing. The Projects tab is a path field and a Browse button; the folder
 is created if it does not exist.
@@ -1317,11 +1362,11 @@ framework, no vendor SDK, and no telemetry.
 
 **Settings → Updates** compares the version published at
 `github.com/dansdesigns/kestrel/version.txt` with the one installed and reports
-the difference. It does not update itself: this is a local-first tool that people
-modify, and replacing their files from the network without asking would be a poor
-trade for saving them a `git pull`. Settings, memory and conversations live
-outside the program folder, so re-running the installer over a fresh copy keeps
-them.
+the difference. When one is available an **Install the update** button appears. A git checkout is
+pulled, which keeps your history; any other copy is replaced from the published
+archive with a backup of what was there first. Settings, memory, conversations
+and projects live outside the program folder and are never touched. Kestrel does
+not ship a `version.txt` of its own — the file it compares against is yours.
 
 ---
 

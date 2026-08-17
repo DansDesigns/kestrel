@@ -9,7 +9,8 @@ import re
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFrame,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                               QComboBox, QFrame, QPlainTextEdit,
                                QSizePolicy,
                                QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit,
@@ -22,7 +23,7 @@ from ..gguf import estimate_vram_mb
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
                 speech as speechmod, sysmon)
 from ..memory import KINDS, MemoryStore
-from ..todo import DOING, DONE, BLOCKED, MARKS
+from ..todo import BLOCKED, DOING, DONE, MARKS, TODO
 from ..runtime import CACHE_TYPES, REASONING_FORMATS, ROPE_SCALING, SPLIT_MODES
 from . import theme
 from PySide6.QtGui import QFont, QFontDatabase
@@ -166,9 +167,9 @@ class ModelsPanel(UiThread, QWidget):
         lay.addWidget(_row(rescan, folder))
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Model", "Quant", "Size", "Ctx"])
+        self.tree.setHeaderLabels(["", "Model", "Quant", "Size", "Ctx"])
         self.tree.setFont(mono_font(10))
-        stretch_columns(self.tree)
+        stretch_columns(self.tree, first_stretch=1)
         # Flush to the panel: a framed, rounded box inside an already-framed
         # panel wastes a margin on each side and reads as a box within a box.
         self.tree.setObjectName("Flush")
@@ -178,6 +179,7 @@ class ModelsPanel(UiThread, QWidget):
         self.tree.setIndentation(0)
         self.tree.setRootIsDecorated(False)
         self.tree.header().setStretchLastSection(False)
+        self.tree.setColumnWidth(0, 22)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree.currentItemChanged.connect(self._show_detail)
         self.tree.itemDoubleClicked.connect(lambda *_: self.load_selected())
@@ -190,6 +192,11 @@ class ModelsPanel(UiThread, QWidget):
         self.detail.setFrameShape(QFrame.NoFrame)
         self.detail.setMaximumHeight(168)
         lay.addWidget(self.detail)
+
+        self.star_btn = QPushButton("Favourite  ★")
+        self.star_btn.setToolTip("Keep this model at the top of the list")
+        self.star_btn.clicked.connect(self.toggle_favourite)
+        lay.addWidget(self.star_btn)
 
         self.load_btn = QPushButton("Load model")
         self.load_btn.setObjectName("Primary")
@@ -221,17 +228,46 @@ class ModelsPanel(UiThread, QWidget):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def is_favourite(self, path) -> bool:
+        return str(path) in (self.cfg.favourite_models or [])
+
+    def toggle_favourite(self) -> None:
+        """Star a model, and keep the starred ones at the top.
+
+        A model library grows quickly and the two or three actually in use are
+        otherwise lost among the rest.
+        """
+        entry = self._entry_for(self.tree.currentItem())
+        if entry is None:
+            return
+        path = str(entry.path)
+        favourites = list(self.cfg.favourite_models or [])
+        if path in favourites:
+            favourites.remove(path)
+            self.statusLine.emit(f"Removed {entry.name} from favourites")
+        else:
+            favourites.append(path)
+            self.statusLine.emit(f"{entry.name} added to favourites")
+        self.cfg.favourite_models = favourites
+        self.cfg.save()
+        self._refilter()
+
     def _refilter(self) -> None:
-        entries = self.catalog.find(self.filter.text())
+        entries = list(self.catalog.find(self.filter.text()))
+        # Starred first, then whatever order the catalogue gave.
+        entries.sort(key=lambda e: (not self.is_favourite(e.path),))
         self.tree.clear()
         for e in entries:
-            item = QTreeWidgetItem(list(e.row()))
+            starred = self.is_favourite(e.path)
+            item = QTreeWidgetItem(["★" if starred else ""] + list(e.row()))
             item.setData(0, Qt.UserRole, str(e.path))
-            item.setToolTip(0, str(e.path))
-            if e.info.error:
-                item.setForeground(0, QColor(theme.ALERT))
-            elif str(e.path) == self.cfg.model_path:
+            item.setToolTip(1, str(e.path))
+            if starred:
                 item.setForeground(0, QColor(theme.AMBER))
+            if e.info.error:
+                item.setForeground(1, QColor(theme.ALERT))
+            elif str(e.path) == self.cfg.model_path:
+                item.setForeground(1, QColor(theme.AMBER))
             self.tree.addTopLevelItem(item)
         for column in range(1, self.tree.columnCount()):
             self.tree.resizeColumnToContents(column)
@@ -767,6 +803,20 @@ class MemoryPanel(QWidget):
         self.reopen()
 
     # -- store ---------------------------------------------------------------
+    def purge(self) -> None:
+        """Remove memories the durability filter would refuse today."""
+        if self.store is None:
+            return
+        removed = self.store.purge_ephemeral(
+            scope=None if self.cfg.memory.scope == "global" else self.cfg.workspace)
+        self.refresh()
+        if removed:
+            QMessageBox.information(
+                self, "Cleaned up",
+                f"Removed {len(removed)} memory(ies) that would not be stored "
+                "today:\n\n" + "\n".join(f"· {t[:80]}" for t in removed[:12]))
+        self.statusLine.emit(f"Removed {len(removed)} stale memory(ies)")
+
     def reopen(self) -> None:
         if self.store is not None:
             self.store.close()
@@ -964,9 +1014,13 @@ class PlanPanel(QWidget):
         # Two rows rather than four across: this panel is often narrow, and a
         # single row clips the labels at any sensible width.
         buttons = [("Add step…", self.add_steps, "Write steps yourself, one per line"),
+                   ("Working", lambda: self.set_status(DOING),
+                    "Mark the selected step as being worked on"),
+                   ("Done", lambda: self.set_status(DONE),
+                    "Mark the selected step finished"),
+                   ("To do", lambda: self.set_status(TODO),
+                    "Put the selected step back to not started"),
                    ("Remove", self.remove_step, "Delete the selected step"),
-                   ("Skip", self.skip_step, "Mark the selected step done without running it"),
-                   ("Clear done", self.clear_done, "Remove every completed step"),
                    ("Clear all", self.clear_all, "Discard the whole plan")]
         for pair in (buttons[:3], buttons[3:]):
             row = QHBoxLayout()
@@ -1042,6 +1096,22 @@ class PlanPanel(QWidget):
             self.update_todo(self.todo)
             self.planEdited.emit()
             self.statusLine.emit(f"Added {added} step(s)")
+
+    def set_status(self, status: str) -> None:
+        """Move the selected step between to do, working and done.
+
+        The model sets these as it goes; being able to set them by hand matters
+        when it gets one wrong, or when the work happened outside Kestrel.
+        """
+        if self.todo is None:
+            return
+        item_id = self._selected()
+        if item_id is None:
+            return
+        if self.todo.update(int(item_id), status):
+            self.update_todo(self.todo)
+            self.planEdited.emit()
+            self.statusLine.emit(f"Step {item_id}: {status}")
 
     def remove_step(self) -> None:
         if self.todo is None:
@@ -1935,7 +2005,10 @@ class SystemPanel(QWidget):
         self.mem.set_value(s.mem_percent,
                            f"{s.mem_used_mb / 1024:.1f} / {s.mem_total_mb / 1024:.1f} GB")
 
-        while len(self.gpu_meters) < len(s.gpus):
+        # Two bars per device: how busy it is, and how much of its memory the
+        # model is holding. The second is the one that decides whether a larger
+        # model will fit, so it belongs on screen next to the others.
+        while len(self.gpu_meters) < len(s.gpus) * 2:
             meter = _Meter("GPU")
             self.gpu_meters.append(meter)
             self.gpu_box.addWidget(meter)
@@ -1944,13 +2017,26 @@ class SystemPanel(QWidget):
             meter.set_value(0, "looking…")
             self.gpu_meters.append(meter)
             self.gpu_box.addWidget(meter)
-        for meter, gpu in zip(self.gpu_meters, s.gpus):
-            meter.label.setText((gpu.name or "GPU")[:26])
+        for index, gpu in enumerate(s.gpus):
+            busy, memory = self.gpu_meters[index * 2], self.gpu_meters[index * 2 + 1]
+            busy.show()
+            memory.show()
+            busy.label.setText((gpu.name or "GPU")[:26])
             if gpu.utilisation >= 0:
-                meter.set_value(gpu.utilisation, f"{gpu.utilisation:.0f}%")
+                busy.set_value(gpu.utilisation, f"{gpu.utilisation:.0f}%")
             else:
-                meter.set_value(gpu.mem_percent, "usage unavailable")
-        for meter in self.gpu_meters[len(s.gpus):]:
+                busy.set_value(0, "usage unavailable")
+
+            memory.label.setText("GPU memory")
+            budget = gpu.budget_mb
+            if budget:
+                used = gpu.mem_used_mb
+                memory.set_value(100.0 * used / budget,
+                                 f"{used / 1024:.1f} / {budget / 1024:.1f} GB"
+                                 + (" shared" if gpu.integrated else ""))
+            else:
+                memory.set_value(0, "unknown")
+        for meter in self.gpu_meters[len(s.gpus) * 2:]:
             meter.hide()
 
         lines = []
@@ -2222,3 +2308,165 @@ class ToolsPanel(QWidget):
                 if desc:
                     lines.append(f"      {desc}")
         self.detail.setPlainText("\n".join(lines))
+
+# ================================================================= canvas ===
+class CanvasPanel(QWidget):
+    """A scratch editor that the model can be pointed at.
+
+    Working on code through a chat window means pasting it in, reading a reply,
+    and pasting it back. The canvas keeps one buffer that both sides can see:
+    you edit it, the model reviews it, and it saves to a real file in the
+    project when it is worth keeping.
+    """
+
+    statusLine = Signal(str)
+    reviewRequested = Signal(str, str)      # text, filename
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.path: Path | None = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setSpacing(6)
+
+        row = QHBoxLayout()
+        self.filename = QLineEdit("scratch.py")
+        self.filename.setToolTip("Saved into the project folder unless you give "
+                                 "a full path")
+        row.addWidget(self.filename, 1)
+        self.language = QComboBox()
+        self.language.addItems(["python", "javascript", "shell", "markdown",
+                                "json", "yaml", "c", "cpp", "rust", "go",
+                                "html", "css", "sql", "other"])
+        self.language.setToolTip("Told to the model when it reviews the file")
+        row.addWidget(self.language)
+        lay.addLayout(row)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setObjectName("Flush")
+        self.editor.setFont(mono_font(10))
+        self.editor.setPlaceholderText(
+            "Write or paste code here.\n\n"
+            "Check asks the model to review exactly this text; Save writes it "
+            "into the project folder.")
+        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.editor.setTabStopDistance(4 * self.editor.fontMetrics()
+                                       .horizontalAdvance(" "))
+        self.editor.textChanged.connect(self._touched)
+        lay.addWidget(self.editor, 1)
+
+        first = QHBoxLayout()
+        for text, slot, tip in (
+                ("Check", self.review, "Ask the model to review this code"),
+                ("Save", self.save, "Write it into the project folder"),
+                ("Copy", self.copy, "Copy the whole buffer to the clipboard")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(slot)
+            first.addWidget(b)
+        lay.addLayout(first)
+
+        second = QHBoxLayout()
+        for text, slot, tip in (
+                ("Open…", self.open_file, "Load a file into the canvas"),
+                ("Save as…", self.save_as, "Write it somewhere else"),
+                ("Clear", self.clear, "Empty the canvas")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(slot)
+            second.addWidget(b)
+        lay.addLayout(second)
+
+        self.note = QLabel("Not saved yet.")
+        self.note.setObjectName("Dim")
+        self.note.setWordWrap(True)
+        lay.addWidget(self.note)
+
+    # -- state ---------------------------------------------------------------
+    def _touched(self) -> None:
+        lines = self.editor.document().blockCount()
+        chars = len(self.editor.toPlainText())
+        where = f"{self.path}" if self.path else "not saved yet"
+        self.note.setText(f"{lines} line(s), {chars:,} characters · {where}")
+
+    def target(self) -> Path:
+        name = self.filename.text().strip() or "scratch.txt"
+        candidate = Path(name).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        return Path(self.cfg.workspace).expanduser() / candidate
+
+    # -- actions -------------------------------------------------------------
+    def review(self) -> None:
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self.statusLine.emit("The canvas is empty.")
+            return
+        self.reviewRequested.emit(text, self.language.currentText())
+
+    def save(self) -> None:
+        target = self.target()
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self.editor.toPlainText(), "utf-8")
+        except OSError as e:
+            QMessageBox.warning(self, "Could not save", str(e))
+            return
+        self.path = target
+        self._touched()
+        self.statusLine.emit(f"Saved {target}")
+
+    def save_as(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(self, "Save canvas as",
+                                                str(self.target()))
+        if not chosen:
+            return
+        self.filename.setText(chosen)
+        self.save()
+
+    def open_file(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open into the canvas", str(Path(self.cfg.workspace).expanduser()))
+        if not chosen:
+            return
+        try:
+            self.editor.setPlainText(Path(chosen).read_text("utf-8", errors="replace"))
+        except OSError as e:
+            QMessageBox.warning(self, "Could not open", str(e))
+            return
+        self.filename.setText(chosen)
+        self.path = Path(chosen)
+        suffix = self.path.suffix.lstrip(".").lower()
+        known = {"py": "python", "js": "javascript", "sh": "shell", "md": "markdown",
+                 "json": "json", "yml": "yaml", "yaml": "yaml", "c": "c",
+                 "cpp": "cpp", "rs": "rust", "go": "go", "html": "html",
+                 "css": "css", "sql": "sql"}
+        if suffix in known:
+            self.language.setCurrentText(known[suffix])
+        self._touched()
+        self.statusLine.emit(f"Opened {chosen}")
+
+    def copy(self) -> None:
+        text = self.editor.toPlainText()
+        if not text:
+            self.statusLine.emit("Nothing to copy.")
+            return
+        QApplication.clipboard().setText(text)
+        self.statusLine.emit(f"Copied {len(text):,} characters")
+
+    def clear(self) -> None:
+        if self.editor.toPlainText().strip() and QMessageBox.question(
+                self, "Clear the canvas", "Discard what is in the canvas?") \
+                != QMessageBox.Yes:
+            return
+        self.editor.clear()
+        self.path = None
+        self._touched()
+
+    def set_text(self, text: str) -> None:
+        self.editor.setPlainText(text)
+        self._touched()

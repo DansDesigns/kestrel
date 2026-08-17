@@ -92,6 +92,11 @@ def normalise(text: str) -> str:
 
 
 class MemoryStore:
+    # A recalled memory scoring below this share of the best match is dropped
+    # rather than injected: relevance, not merely ranking, is what earns space
+    # in a prompt that is re-sent every turn.
+    MIN_SHARE = 0.45
+
     def __init__(self, path: str | Path, scope: str = ""):
         self.path = Path(path).expanduser()
         if not self.path.parent or str(self.path.parent) in ("", "."):
@@ -226,7 +231,14 @@ class MemoryStore:
                 hits = sum(1 for t in terms if t in haystack)
                 if not hits:
                     continue
+                # One incidental word in common is not relevance. A single hit
+                # only counts when it is a distinctive word rather than one
+                # that appears in half the store — otherwise a note about the
+                # clock surfaces on every prompt that happens to say "time".
+                if hits == 1 and len(terms) > 2 and self._common(terms, haystack):
+                    continue
                 m.score = self._score(m, max(relevance, float(hits)))
+                m.hits = hits
                 results[m.id] = m
 
         if include_pinned:
@@ -270,6 +282,25 @@ class MemoryStore:
             out.append((r, float(hits)))
         return out
 
+    def _common(self, terms: list[str], haystack: str) -> bool:
+        """Is the only matching term a word that matches nearly everything?
+
+        A store where "time" appears in half the entries will surface one of
+        them for any prompt mentioning time, which is how an irrelevant note
+        ends up in every prompt.
+        """
+        matched = [t for t in terms if t in haystack]
+        if not matched:
+            return True
+        try:
+            row = self.db.execute(
+                "SELECT COUNT(*) FROM memories WHERE norm LIKE ?",
+                (f"%{matched[0]}%",)).fetchone()
+        except Exception:
+            return False
+        total = self.count() or 1
+        return bool(row and row[0] / total > 0.4)
+
     @staticmethod
     def _score(m: Memory, relevance: float) -> float:
         recency = 1.0 / (1.0 + m.age_days() / 45.0)
@@ -297,6 +328,12 @@ class MemoryStore:
         found = self.search(query, limit=limit, scope=scope)
         if not found:
             return "", []
+        # Keep the strong matches and anything close to them; drop the tail.
+        # A weak match propped up by recency and importance is still weak, and
+        # it costs context on every single turn.
+        best = max(m.score for m in found)
+        found = [m for m in found
+                 if m.pinned or m.score >= best * self.MIN_SHARE]
         lines: list[str] = []
         used = counter.count("What you remember:") + 4
         kept: list[Memory] = []
@@ -313,6 +350,23 @@ class MemoryStore:
         return "What you remember:\n" + "\n".join(lines), kept
 
     # -- maintenance ----------------------------------------------------------
+    def purge_ephemeral(self, scope: str | None = None) -> list[str]:
+        """Delete stored memories that would not be accepted today.
+
+        The durability filter arrived after some stores did, so a note about
+        the current time can sit in one indefinitely, matching often and
+        meaning nothing. Returns what was removed, for reporting.
+        """
+        removed: list[str] = []
+        for m in self.all(scope=scope, limit=5000):
+            if m.pinned:
+                continue
+            ok, _reason = is_durable(m.text)
+            if not ok:
+                removed.append(m.text)
+                self.forget(m.id)
+        return removed
+
     def prune(self, max_items: int = 2000, min_importance: int = 2) -> int:
         """Drop the least useful unpinned memories once the store gets large."""
         with self._lock:

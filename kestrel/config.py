@@ -134,6 +134,7 @@ class Config:
     auto_start_server: bool = True    # start the backend if nothing is serving
     theme: str = "dark"               # dark | light
     show_tool_detail: bool = False    # show arguments and raw output in the transcript
+    favourite_models: list[str] = field(default_factory=list)
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""
     font_size: int = 13

@@ -30,7 +30,8 @@ from ..agent import Agent, strip_calls
 from ..config import Config, Node
 from ..llm import LlamaClient, LLMError
 from . import theme
-from .panels import (BackendPanel, MemoryPanel, ModelsPanel, ParamsPanel,
+from .panels import (BackendPanel, CanvasPanel, MemoryPanel, ModelsPanel,
+                     ParamsPanel,
                      PersonaPanel, PlanPanel, ProjectsPanel, SpeechPanel,
                      SystemPanel, ToolsPanel, UiThread, _row)
 from .downloads_window import DownloadsWindow
@@ -635,6 +636,7 @@ class MainWindow(QWidget):
         self.models_panel = self.params_panel = self.skills_panel = None
         self.memory_panel = self.persona_panel = self.speech_panel = None
         self.backend_panel = self.system_panel = self.tools_panel = None
+        self.canvas_panel = None
         self._tool_list: list[dict] = []
         self._gen_start = None
         self._gen_last = 0.0
@@ -708,14 +710,13 @@ class MainWindow(QWidget):
         # Vertical icon rail: nine horizontal tabs never fitted a narrow panel,
         # and elided text ("S...", "M...") named nothing. Icons plus tooltips
         # stay legible at any width.
-        self._icon_tabs = ["status", "projects", "models", "params", "cluster",
-                           "tools", "skills", "memory", "persona", "speech",
-                           "backend"]
+        self._icon_tabs = ["projects", "status", "models", "params", "persona",
+                           "cluster", "canvas", "tools", "skills", "memory",
+                           "speech", "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
         left.setTabPosition(QTabWidget.West)
-        left.addTab(self._status_tab(), "Status")
 
         self.progress("reading projects")
         self.projects_panel = ProjectsPanel(self.cfg)
@@ -724,11 +725,14 @@ class MainWindow(QWidget):
         self.projects_panel.sessionChosen.connect(self.open_session)
         self.projects_panel.newSession.connect(self.new_session)
         left.addTab(self.projects_panel, "Projects")
+        left.addTab(self._status_tab(), "Status")
 
         left.addTab(self._lazy(lambda: ModelsPanel(self.cfg), self._wire_models),
                     "Models")
         left.addTab(self._lazy(lambda: ParamsPanel(self.cfg), self._wire_params),
                     "Params")
+        left.addTab(self._lazy(lambda: PersonaPanel(self.cfg), self._wire_persona),
+                    "Persona")
 
         self.progress("checking the cluster")
         self.cluster = ClusterPanel(self.cfg)
@@ -738,13 +742,13 @@ class MainWindow(QWidget):
         self.cluster.logLine.connect(self.busy_overlay.update_detail)
         left.addTab(self.cluster, "Cluster")
 
+        left.addTab(self._lazy(lambda: CanvasPanel(self.cfg), self._wire_canvas),
+                    "Canvas")
         left.addTab(self._lazy(ToolsPanel, self._wire_tools), "Tools")
         left.addTab(self._lazy(lambda: SkillsPanel(self.cfg), self._wire_skills),
                     "Skills")
         left.addTab(self._lazy(lambda: MemoryPanel(self.cfg), self._wire_memory),
                     "Memory")
-        left.addTab(self._lazy(lambda: PersonaPanel(self.cfg), self._wire_persona),
-                    "Persona")
         left.addTab(self._lazy(lambda: SpeechPanel(self.cfg), self._wire_speech),
                     "Speech")
         left.addTab(self._lazy(lambda: BackendPanel(self.cfg), self._wire_backend),
@@ -1191,6 +1195,11 @@ class MainWindow(QWidget):
         p.statusLine.connect(self._status)
         p.appearanceChanged.connect(self.apply_appearance)
 
+    def _wire_canvas(self, p) -> None:
+        self.canvas_panel = p
+        p.statusLine.connect(self._status)
+        p.reviewRequested.connect(self.review_canvas)
+
     def _wire_tools(self, p) -> None:
         self.tools_panel = p
         p.update_tools(self._tool_list)
@@ -1415,6 +1424,9 @@ class MainWindow(QWidget):
         self.worker.token.connect(lambda _t: self.typing.set_label("writing"))
         self.worker.token.connect(self._speak_chunk)
         self.worker.thinking.connect(lambda _t: self.typing.set_label("reasoning"))
+        # Reasoning tokens are tokens: the rate should not read zero through
+        # the part of a turn that often takes longest.
+        self.worker.thinking.connect(self._count_token)
         self.worker.toolCall.connect(
             lambda name, _a: self.typing.set_label(f"running {name}"))
         self.worker.stepped.connect(
@@ -2195,6 +2207,39 @@ class MainWindow(QWidget):
     def _downloaded(self, path: str) -> None:
         self.log.appendPlainText(f"[download] {path}")
         self._with("models_panel", lambda p: p.rescan())
+
+    @Slot(str, str)
+    def review_canvas(self, text: str, language: str) -> None:
+        """Send the canvas to the model for review.
+
+        The code travels in the message rather than being written to disk
+        first: reviewing what is on screen is the point, and saving a
+        half-finished file only to read it back is a detour.
+        """
+        if self.busy:
+            self._status("Busy — wait for the current turn to finish")
+            return
+        name = self.canvas_panel.filename.text().strip() if self.canvas_panel else ""
+        prompt = (
+            f"Review this {language} from the canvas"
+            + (f" ({name})" if name else "") + ".\n\n"
+            "Point out anything that is wrong or will break, then anything "
+            "worth improving. Be specific about lines. If it is fine, say so "
+            "briefly rather than inventing problems.\n\n"
+            f"```{language}\n{text.rstrip()}\n```")
+        self.chat.add_note(f"Reviewing the canvas ({len(text):,} characters)…",
+                           theme.TEXT_DIM)
+        self.busy = True
+        self.speaker.reset()
+        self.typing.start("reading the code")
+        self.plan_panel.set_running(True)
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.continue_btn.setEnabled(False)
+        agent = self.worker.agent
+        self._pending_prompt = prompt
+        self._pending_mark = len(agent.history) if agent is not None else 0
+        self.requestSend.emit(prompt)
 
     def open_settings(self) -> None:
         """Application settings. Model settings live in the Params panel."""

@@ -59,12 +59,13 @@ class TodoList:
     items: list[TodoItem] = field(default_factory=list)
     updated: float = 0.0
     stale_steps: int = 0        # steps taken since the plan last changed
+    root: Path | None = None    # the project folder PLAN.md is written into
 
     # -- lifecycle -----------------------------------------------------------
     @classmethod
     def load(cls, workspace: str | Path) -> "TodoList":
         p = Path(workspace) / ".kestrel" / "todo.json"
-        tl = cls(path=p)
+        tl = cls(path=p, root=Path(workspace))
         if p.exists():
             try:
                 raw = json.loads(p.read_text("utf-8"))
@@ -77,6 +78,44 @@ class TodoList:
                 pass
         return tl
 
+    MARKDOWN_MARKS = {TODO: " ", DOING: ">", DONE: "x", BLOCKED: "!"}
+
+    def markdown(self) -> str:
+        """The plan as a document, not a data structure.
+
+        Written beside the project's files so the state of the work is legible
+        without Kestrel running — in an editor, on a phone, in a diff.
+        """
+        done, total = self.progress
+        title = self.title.strip() or "Plan"
+        lines = [f"# {title}", ""]
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        lines.append(f"Updated {stamp} · {done} of {total} done")
+        lines.append("")
+        for item in self.items:
+            mark = self.MARKDOWN_MARKS.get(item.status, " ")
+            note = f" — {item.note}" if item.note else ""
+            lines.append(f"- [{mark}] {item.text}{note}")
+        if any(i.status == BLOCKED for i in self.items):
+            lines += ["", "`!` marks a step that could not be completed."]
+        if any(i.status == DOING for i in self.items):
+            lines += ["", "`>` marks the step in progress."]
+        return "\n".join(lines) + "\n"
+
+    def write_markdown(self) -> Path | None:
+        """Keep PLAN.md beside the work, updated on every change."""
+        if not self.root:
+            return None
+        target = Path(self.root).expanduser() / "PLAN.md"
+        try:
+            if not self.items:
+                target.unlink(missing_ok=True)
+                return None
+            target.write_text(self.markdown(), "utf-8")
+            return target
+        except OSError:
+            return None
+
     def save(self) -> None:
         if self.path is None:
             return
@@ -86,6 +125,9 @@ class TodoList:
                 "title": self.title, "updated": self.updated,
                 "items": [asdict(i) for i in self.items],
             }, indent=1), "utf-8")
+            # The JSON is the state; the markdown is the same thing for a
+            # person, kept beside the project's own files.
+            self.write_markdown()
         except OSError:
             pass
 
