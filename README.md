@@ -275,12 +275,36 @@ evidence. Each turn opens with a line naming the step to start from. Verified:
 a three-step plan typed in by hand survived a turn intact, was followed in
 order, and the model's own alternative plan was never substituted.
 
+Completed steps carry a green tick, and a step longer than the panel wraps onto
+as many lines as it needs rather than being cut off.
+
+**Thinking blocks collapse.** A trace is the most interesting thing in the
+transcript when something has gone wrong and the least interesting when it has
+not, so it shows its opening with the whole of it one click away.
+
 **Setting a step by hand.** *Working*, *Done* and *To do* move the selected step
 between states. The model sets these as it goes; setting them yourself matters
 when it gets one wrong, or when the work happened outside Kestrel. Each change
 rewrites PLAN.md.
 
-**The canvas** is a scratch editor in its own tab. Working on code through a chat
+**The canvas** is a shared editor on the right rail — shared because the model
+writes to it too. A model asked to produce code in a chat reply has to reproduce
+the whole thing every time it changes a line, which is slow, expensive in
+context and error-prone. Instead it reads the canvas with line numbers and edits
+a span of them:
+
+| Tool | Does |
+|---|---|
+| `canvas_read` | The buffer, line-numbered |
+| `canvas_write` | Replace it entirely |
+| `canvas_append` | Add to the end |
+| `canvas_edit` | Replace lines *start..end* |
+
+The prompt tells the model to write code there rather than in its reply, and to
+say what it did instead of repeating it. Edits from either side appear on the
+other immediately.
+
+**The canvas** is a scratch editor. Working on code through a chat
 window means pasting it in, reading a reply and pasting it back; the canvas keeps
 one buffer both sides can see. **Check** sends exactly what is on screen for
 review, **Save** writes it into the project folder, and **Copy** takes the lot.
@@ -545,6 +569,12 @@ The window has a second tab listing the models already on disk, with their sizes
 and a running total — downloading without seeing what you already have is how a
 20 GB file gets fetched twice. Models can be deleted from there as well as from
 the Models panel.
+
+**An unfinished download survives a restart.** The queue is written alongside the
+`.part` files, so a transfer paused when Kestrel closed reappears — still paused,
+because a download that resumes itself on launch is a surprise — with Resume
+ready. Verified: paused at 1 MB, restarted, resumed, and the finished file was
+the right size.
 
 Several run at once, two by default and up to four. Each can be **paused and
 resumed**: pausing keeps the bytes already on disk in a `.part` file, and
@@ -1037,8 +1067,9 @@ reaches — read, writes, or runs commands — and its full signature and
 parameters. The system prompt tells the model; this tells you.
 
 **A chime marks the end of a task**, since a long one is worth walking away from
-and a finished run looks much like a stalled one at a glance. It can be switched
-off in Settings → Agent.
+and a finished run looks much like a stalled one at a glance. Settings → Agent
+switches it off, or replaces it: the bundled chime, anything the platform
+already provides, or a file of your own in wav, mp3, flac or ogg.
 
 **Right column.** A matching icon rail: the live task checklist; an activity tree
 recording every tool call with its complete untruncated output; the
@@ -1059,6 +1090,14 @@ counters Task Manager uses, covering Intel and AMD integrated parts, and on
 Linux from `/sys/class/drm`. Sampling happens on a background thread: reading
 those counters spawns a process and takes the better part of a second, which is
 not something to make the interface wait for.
+
+**Contrast.** Dimmed text sits at better than 6:1 against its background in both
+palettes, and a selected row has its own background *and* its own text colour —
+inheriting the unselected colour is how a highlighted row ends up unreadable.
+
+**Table columns.** The last column takes the remaining width rather than
+whatever is left over. A divider handle sits on a column's right edge, so a
+last column sized to its contents can be clipped with no way to drag it wider.
 
 **Themes.** Two palettes, switchable from the top bar and remembered between
 sessions. Light is a paper-and-bronze daylight face rather than an inverted dark
@@ -1355,6 +1394,19 @@ kestrel/
 Dependencies: PySide6 (LGPL), requests, PyYAML. SQLite is part of the standard
 library. Speech engines are optional and detected, never bundled. There is no
 framework, no vendor SDK, and no telemetry.
+
+---
+
+## 18. Support and thanks
+
+**Settings → About** carries the version, what Kestrel is, and two links:
+
+- **Forum** — https://alternitech.freeforums.net/ for questions, problems and
+  suggestions.
+- **Donate** — https://alternitech.square.site/product/donation/6
+
+Kestrel is free and stays that way; the donation page is there for anyone who
+finds it useful enough to put something back.
 
 ---
 

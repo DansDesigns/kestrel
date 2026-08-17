@@ -19,7 +19,10 @@ from pathlib import Path
 
 TODO, DOING, DONE, BLOCKED = "todo", "doing", "done", "blocked"
 STATUSES = [TODO, DOING, DONE, BLOCKED]
+# What the model sees in the prompt stays plain ASCII; the interface draws its
+# own marks, because a tick reads as success in a way that "x" does not.
 MARKS = {TODO: " ", DOING: ">", DONE: "x", BLOCKED: "!"}
+DISPLAY_MARKS = {TODO: "○", DOING: "▸", DONE: "✓", BLOCKED: "!"}
 _ALIASES = {
     "pending": TODO, "open": TODO, "not started": TODO, "todo": TODO,
     "active": DOING, "in progress": DOING, "in_progress": DOING,

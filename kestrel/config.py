@@ -128,6 +128,7 @@ class Config:
     auto_plan: bool = True            # ask for a checklist before multi-step work
     plan_driven: bool = True          # keep working until the checklist is closed
     bell_on_finish: bool = True
+    bell_sound: str = ""              # blank uses the bundled chime
     llama_backend: str = "auto"       # cpu | cuda | vulkan | hip | metal | sycl
     llama_with_rpc: bool = True       # build with the RPC backend for clustering
     auto_install_llama: bool = False
@@ -135,6 +136,7 @@ class Config:
     theme: str = "dark"               # dark | light
     show_tool_detail: bool = False    # show arguments and raw output in the transcript
     favourite_models: list[str] = field(default_factory=list)
+    canvas_enabled: bool = True       # give the model the shared code canvas
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""
     font_size: int = 13

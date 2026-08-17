@@ -757,6 +757,42 @@ PLAYERS = [
 ]
 
 
+SOUND_TYPES = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff")
+
+
+def sound_choices(extra: str = "") -> list[tuple[str, str]]:
+    """Sounds that can be used for the finish chime, as (label, path).
+
+    The bundled one first, then anything the platform already provides, so a
+    choice exists without hunting for a file.
+    """
+    from pathlib import Path as _P
+
+    found: list[tuple[str, str]] = [("Kestrel chime (bundled)", "")]
+    shipped = _P(__file__).resolve().parent.parent / "assets" / "bell.wav"
+    seen = set()
+    folders = [
+        _P("C:/Windows/Media"),
+        _P("/usr/share/sounds/freedesktop/stereo"),
+        _P("/usr/share/sounds/ubuntu/stereo"),
+        _P("/System/Library/Sounds"),
+    ]
+    for folder in folders:
+        try:
+            if not folder.is_dir():
+                continue
+            for f in sorted(folder.iterdir())[:60]:
+                if f.suffix.lower() in SOUND_TYPES and f.name not in seen:
+                    seen.add(f.name)
+                    found.append((f.stem, str(f)))
+        except OSError:
+            continue
+    if extra and extra not in {p for _, p in found}:
+        found.insert(1, (_P(extra).name, extra))
+    _ = shipped
+    return found
+
+
 def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
@@ -768,7 +804,8 @@ def play(path: Path, blocking: bool = True) -> None:
     meant PowerShell — costs a good fraction of a second per clip, which is
     most of the delay when speaking a reply sentence by sentence.
     """
-    if os.name == "nt":
+    if os.name == "nt" and Path(path).suffix.lower() == ".wav":
+        # winsound plays wav only; anything else falls through to a decoder.
         try:
             import winsound          # bundled with Python on Windows
             flags = winsound.SND_FILENAME | (0 if blocking else winsound.SND_ASYNC)

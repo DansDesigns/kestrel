@@ -166,6 +166,9 @@ def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
     files.register(reg, ws)
     shell.register(reg, ws)
     skillset.register(reg, skills_provider)
+    if getattr(cfg, "canvas_enabled", True):
+        from . import canvas as canvastools
+        canvastools.register(reg)
     if todo_provider is not None and cfg.todo_enabled:
         from . import planning
         planning.register(reg, todo_provider)

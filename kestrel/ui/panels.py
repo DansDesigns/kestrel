@@ -20,15 +20,17 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
 
 from .. import models as modelsmod
 from ..gguf import estimate_vram_mb
+from .. import canvas as canvasmod
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
                 speech as speechmod, sysmon)
 from ..memory import KINDS, MemoryStore
-from ..todo import BLOCKED, DOING, DONE, MARKS, TODO
+from ..todo import BLOCKED, DISPLAY_MARKS, DOING, DONE, MARKS, TODO
 from ..runtime import CACHE_TYPES, REASONING_FORMATS, ROPE_SCALING, SPLIT_MODES
 from . import theme
 from PySide6.QtGui import QFont, QFontDatabase
 
-from .widgets import Field, GpuSplit, Readout, mono_font, stretch_columns
+from .widgets import (Field, GpuSplit, Readout, WrappingDelegate, mono_font,
+                      stretch_columns)
 
 # Windows ships bitmap-only faces with no outlines for Qt to instantiate;
 # listing them logs a DirectWrite failure each and yields nothing usable.
@@ -976,6 +978,8 @@ class PlanPanel(QWidget):
         self.tree.setFont(mono_font(10))
         self.tree.setRootIsDecorated(False)
         self.tree.setWordWrap(True)
+        self.tree.setUniformRowHeights(False)
+        self.tree.setItemDelegateForColumn(1, WrappingDelegate(self.tree))
         # Steps are edited where they are read: double-click the text, or press
         # F2. A plan is a working document, and retyping it through a dialog to
         # fix a word is friction the model does not have.
@@ -1203,9 +1207,13 @@ class PlanPanel(QWidget):
                               + (f" — {todo.title}" if todo.title else ""))
         current = todo.current
         for item in todo.items:
-            row = QTreeWidgetItem([MARKS.get(item.status, " "),
+            row = QTreeWidgetItem([DISPLAY_MARKS.get(item.status, "○"),
                                    item.text + (f"  — {item.note}" if item.note else "")])
             row.setData(0, Qt.UserRole, item.id)
+            # The mark belongs beside the first line of a wrapped step, not
+            # floating in the middle of the space the text needs.
+            row.setTextAlignment(0, Qt.AlignTop | Qt.AlignHCenter)
+            row.setTextAlignment(1, Qt.AlignTop | Qt.AlignLeft)
             row.setFlags(row.flags() | Qt.ItemIsEditable)
             row.setToolTip(1, f"step {item.id} · {item.status} — double-click to edit")
             colour = {DONE: theme.SIGNAL, DOING: theme.AMBER,
@@ -2320,12 +2328,18 @@ class CanvasPanel(QWidget):
     """
 
     statusLine = Signal(str)
-    reviewRequested = Signal(str, str)      # text, filename
+    reviewRequested = Signal(str, str)      # text, language
+    bufferChanged = Signal(str)             # the model wrote to the canvas
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.path: Path | None = None
+        self._syncing = False
+        # The model writes through the shared buffer, which knows nothing about
+        # Qt; the signal carries the change onto the GUI thread.
+        self.bufferChanged.connect(self._buffer_changed)
+        canvasmod.BUFFER.listen(lambda text: self.bufferChanged.emit(text))
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 8, 12, 8)
@@ -2387,7 +2401,23 @@ class CanvasPanel(QWidget):
         lay.addWidget(self.note)
 
     # -- state ---------------------------------------------------------------
+    def _buffer_changed(self, text: str) -> None:
+        if text == self.editor.toPlainText():
+            return
+        cursor = self.editor.textCursor().position()
+        self._syncing = True
+        self.editor.setPlainText(text)
+        self._syncing = False
+        moved = self.editor.textCursor()
+        moved.setPosition(min(cursor, len(text)))
+        self.editor.setTextCursor(moved)
+        self.statusLine.emit("The model wrote to the canvas")
+
     def _touched(self) -> None:
+        if not self._syncing:
+            canvasmod.BUFFER.set(self.editor.toPlainText(),
+                                 language=self.language.currentText(),
+                                 name=self.filename.text().strip())
         lines = self.editor.document().blockCount()
         chars = len(self.editor.toPlainText())
         where = f"{self.path}" if self.path else "not saved yet"

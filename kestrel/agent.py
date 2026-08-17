@@ -347,6 +347,7 @@ class Agent:
             dialect=self.dialect,
             persona=self._persona_text(),
             has_plan_tools=bool(self.registry and "plan" in self.registry.tools),
+            has_canvas=bool(self.registry and "canvas_write" in self.registry.tools),
         )
         return self._system_cache
 

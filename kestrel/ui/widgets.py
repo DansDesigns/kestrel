@@ -12,12 +12,14 @@ import html
 import re
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter, QPen,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
+                           QPainter, QPen,
                            QPixmap, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
                                QApplication, QComboBox, QHBoxLayout, QHeaderView,
                                QLabel, QPlainTextEdit, QSizePolicy, QSlider,
-                               QTabBar, QTextBrowser, QTextEdit, QTreeWidget,
+                               QStyle, QStyledItemDelegate, QTabBar, QTextBrowser,
+                               QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import theme
@@ -247,6 +249,9 @@ class ChatView(QTextBrowser):
         self._replaying = False
         self._reply_no = 0
         self._reply_text: dict[int, str] = {}
+        self._thought_no = 0
+        self._thought_full: dict[int, str] = {}
+        self._thought_open: set[int] = set()
         # Links are the only clickable element a text document offers; buttons
         # cannot be embedded in the flow.
         self.setOpenLinks(False)
@@ -260,6 +265,9 @@ class ChatView(QTextBrowser):
         self._writing = False
         self._reply_no = 0
         self._reply_text: dict[int, str] = {}
+        self._thought_no = 0
+        self._thought_full: dict[int, str] = {}
+        self._thought_open: set[int] = set()
         # Links are the only clickable element QTextEdit offers; buttons cannot
         # be embedded in the document flow.
         self.setOpenLinks(False)          # QTextBrowser: handle them ourselves
@@ -273,7 +281,14 @@ class ChatView(QTextBrowser):
             return
         _, _, rest = text.partition(":")
         action, _, index = rest.partition(":")
-        self.actionRequested.emit(action, int(index or 0))
+        number = int(index or 0)
+        if action == "thought":
+            # Toggling is a view change, so the transcript is simply redrawn
+            # from its own record rather than patched in place.
+            self._thought_open ^= {number}
+            self.rerender()
+            return
+        self.actionRequested.emit(action, number)
 
     def _actions_html(self, index: int) -> str:
         """A row of actions under a reply."""
@@ -455,6 +470,9 @@ class ChatView(QTextBrowser):
             approx = "~"
         else:
             approx = ""
+        # The whole trace is kept so it can be expanded later; the head is what
+        # is shown until then.
+        full = body.strip()
         head = " ".join(body.split())
         if len(head) > 200:
             head = head[:199] + "\u2026"
@@ -465,16 +483,34 @@ class ChatView(QTextBrowser):
         self.setTextCursor(c)
         self._thought_anchor = None
         self._thought_buf = ""
-        self._record("_thought_line", head, tokens, approx)
-        self._thought_line(head, tokens, approx)
+        self._record("_thought_line", head, tokens, approx, full)
+        self._thought_line(head, tokens, approx, full)
 
-    def _thought_line(self, head: str, tokens: int, approx: str = "") -> None:
-        body = (f'<div style="color:{theme.TEXT_DIM};font-size:11px;">'
-                f'{html.escape(head)}</div>'
+    def _thought_line(self, head: str, tokens: int, approx: str = "",
+                      full: str = "") -> None:
+        """A thought, shown short with the whole of it one click away.
+
+        The trace is the most interesting thing in the transcript when something
+        has gone wrong and the least interesting when it has not, so it is
+        collapsed by default rather than hidden or shown whole.
+        """
+        self._thought_no += 1
+        index = self._thought_no
+        whole = full or head
+        self._thought_full[index] = whole
+        expanded = index in self._thought_open
+        shown = whole if expanded else _first_lines(whole, 2)
+        more = len(whole) > len(shown)
+        label = "less" if expanded else "more"
+        toggle = (f'  <a href="kestrel:thought:{index}" '
+                  f'style="color:{theme.THINK};text-decoration:none;">'
+                  f'[{label}]</a>') if (more or expanded) else ""
+        body = (f'<div style="color:{theme.TEXT_DIM};font-size:11px;'
+                f'white-space:pre-wrap;">{html.escape(shown)}</div>'
                 f'<div style="color:{theme.TEXT_DIM};font-size:10px;">'
-                f'{approx}{tokens} tokens · not resent</div>')
+                f'{approx}{tokens} tokens · not resent{toggle}</div>')
         self._append(self.bubble("Thinking", body, theme.THINK,
-                                 theme.BUBBLE_THINK, width="66%", italic=True))
+                                 theme.BUBBLE_THINK, width="70%", italic=True))
 
     def end_thought(self, text: str, tokens: int) -> None:
         """Called when the turn's generation finishes. If the trace already
@@ -553,6 +589,7 @@ class ChatView(QTextBrowser):
             self._thought_anchor = None
             self._thought_buf = ""
             self._reply_no = 0      # replay reproduces the same numbering
+            self._thought_no = 0
             for kind, args in entries:
                 getattr(self, kind)(*args)
         finally:
@@ -781,13 +818,23 @@ def stretch_columns(tree, first_stretch: int = 0) -> None:
     slack and the rest are merely allowed to shrink.
     """
     header = tree.header()
-    header.setStretchLastSection(False)
+    # The last section takes the slack. Without this the rightmost column is
+    # whatever is left over, which on a narrow panel is nothing at all — and a
+    # divider handle sits on a column's right edge, so there is no way to drag
+    # the last one wider either.
+    header.setStretchLastSection(True)
     header.setMinimumSectionSize(24)
     header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    last = tree.columnCount() - 1
     for i in range(tree.columnCount()):
-        header.setSectionResizeMode(
-            i, QHeaderView.Stretch if i == first_stretch else QHeaderView.Interactive)
-        if i != first_stretch:
+        if i == last:
+            mode = QHeaderView.Stretch          # absorbs the remaining width
+        elif i == first_stretch:
+            mode = QHeaderView.Stretch
+        else:
+            mode = QHeaderView.Interactive
+        header.setSectionResizeMode(i, mode)
+        if mode is QHeaderView.Interactive:
             tree.resizeColumnToContents(i)
     tree.setMinimumWidth(0)
     tree.setSizePolicy(QSizePolicy.Ignored, tree.sizePolicy().verticalPolicy())
@@ -1352,3 +1399,44 @@ def install_wheel_guard(app) -> WheelGuard:
     guard = WheelGuard(app)
     app.installEventFilter(guard)
     return guard
+
+
+class WrappingDelegate(QStyledItemDelegate):
+    """Lets a tree row grow to fit wrapped text.
+
+    A QTreeWidget gives every row one line unless something tells it otherwise,
+    so a step longer than the panel is simply cut off. This measures the text at
+    the column's real width and asks for the height it needs.
+    """
+
+    def sizeHint(self, option, index):  # noqa: N802
+        text = index.data() or ""
+        width = max(60, option.rect.width() or
+                    self.parent().columnWidth(index.column()) if self.parent() else 200)
+        metrics = QFontMetrics(option.font)
+        rect = metrics.boundingRect(0, 0, width - 8, 10_000,
+                                    Qt.TextWordWrap | Qt.AlignLeft, str(text))
+        base = super().sizeHint(option, index)
+        return QSize(base.width(), max(base.height(), rect.height() + 8))
+
+    def paint(self, painter, option, index):  # noqa: N802
+        text = str(index.data() or "")
+        if "\n" not in text and len(text) < 40:
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        colour = index.data(Qt.ForegroundRole)
+        painter.setPen(colour.color() if colour else option.palette.text().color())
+        painter.setFont(option.font)
+        painter.drawText(option.rect.adjusted(4, 3, -4, -3),
+                         Qt.TextWordWrap | Qt.AlignTop | Qt.AlignLeft, text)
+        painter.restore()
+
+
+def _first_lines(text: str, count: int = 2, limit: int = 220) -> str:
+    """The opening of a trace: enough to recognise it, not enough to drown in."""
+    lines = [l for l in str(text or "").splitlines() if l.strip()]
+    head = " ".join(lines[:count])
+    return head[:limit] + ("…" if len(head) > limit else "")

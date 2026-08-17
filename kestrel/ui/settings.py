@@ -12,13 +12,15 @@ from pathlib import Path
 import threading
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QMessageBox,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton,
                                QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
+from .. import speech as speechmod
 from .. import update
 from ..cluster import find_rpc_binary, find_server_binary
 from ..config import Config, default_skill_dirs
@@ -66,6 +68,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._endpoint_tab(), "Endpoint")
         tabs.addTab(self._folders_tab(), "Folders")
         tabs.addTab(self._updates_tab(), "Updates")
+        tabs.addTab(self._about_tab(), "About")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -133,6 +136,19 @@ class SettingsDialog(QDialog):
         self.bell.setChecked(c.bell_on_finish)
         lay.addWidget(self.bell)
 
+        self.bell_sound = QComboBox()
+        for label, path in speechmod.sound_choices(c.bell_sound):
+            self.bell_sound.addItem(label, path)
+        index = self.bell_sound.findData(c.bell_sound)
+        self.bell_sound.setCurrentIndex(max(0, index))
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._pick_sound)
+        listen = QPushButton("Play")
+        listen.clicked.connect(self._play_sound)
+        lay.addWidget(Field("Sound", _row(self.bell_sound, browse, listen),
+                            "wav, mp3, flac or ogg. Anything but wav needs "
+                            "sounddevice and soundfile, or ffmpeg."))
+
         apply_btn = QPushButton("Apply")
         apply_btn.setObjectName("Primary")
         apply_btn.clicked.connect(self.apply_agent)
@@ -160,6 +176,7 @@ class SettingsDialog(QDialog):
         c.watch_skills = self.watch_skills.isChecked()
         c.plan_driven = self.plan_driven.isChecked()
         c.bell_on_finish = self.bell.isChecked()
+        c.bell_sound = self.bell_sound.currentData() or ""
         c.save()
         self._note("Agent settings saved")
 
@@ -296,6 +313,66 @@ class SettingsDialog(QDialog):
         lay.addWidget(_row(add2, remove2))
         return w
 
+    FORUM = "https://alternitech.freeforums.net/"
+    DONATE = "https://alternitech.square.site/product/donation/6"
+
+    def _about_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(10)
+
+        title = QLabel("Kestrel")
+        title.setObjectName("Section")
+        lay.addWidget(title)
+
+        version = QLabel(f"Version {update.local_version()}")
+        version.setObjectName("Readout")
+        lay.addWidget(version)
+
+        blurb = QLabel(
+            "An agentic harness for llama.cpp: a local model that plans a task, "
+            "works through it with tools, and keeps a checklist you can read and "
+            "edit while it goes.\n\n"
+            "It is built to do real work inside a small context window rather "
+            "than assume a large one, so it runs on the hardware people actually "
+            "have. Nothing is sent anywhere unless you point it at a remote "
+            "endpoint yourself — the model, the files, the memory and the "
+            "conversations all stay on this machine.")
+        blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+
+        support = QLabel(
+            "Questions, problems and suggestions are welcome on the forum:<br>"
+            f'<a href="{self.FORUM}" style="color:#A0670F;">{self.FORUM}</a>')
+        support.setOpenExternalLinks(True)
+        support.setWordWrap(True)
+        lay.addWidget(support)
+
+        thanks = QLabel(
+            "Kestrel is free. If it saves you time and you would like to put "
+            "something back towards its development, there is a donation page.")
+        thanks.setWordWrap(True)
+        thanks.setObjectName("Dim")
+        lay.addWidget(thanks)
+
+        donate = QPushButton("Donate")
+        donate.setObjectName("Primary")
+        donate.setToolTip(self.DONATE)
+        donate.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self.DONATE)))
+        forum = QPushButton("Open the forum")
+        forum.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self.FORUM)))
+        lay.addWidget(_row(donate, forum))
+
+        lay.addStretch(1)
+        credit = QLabel("Built on llama.cpp, PySide6, Piper and whisper.cpp — "
+                        "each doing the hard part.")
+        credit.setWordWrap(True)
+        credit.setObjectName("Dim")
+        lay.addWidget(credit)
+        return w
+
     def _updates_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -394,6 +471,30 @@ class SettingsDialog(QDialog):
                                     "Restart Kestrel to run the new version.")
 
     # -- helpers --------------------------------------------------------------
+    def _pick_sound(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chime sound", str(Path.home()),
+            "Sound files (*.wav *.mp3 *.flac *.ogg *.m4a *.aiff);;All files (*)")
+        if not path:
+            return
+        self.bell_sound.insertItem(1, Path(path).name, path)
+        self.bell_sound.setCurrentIndex(1)
+
+    def _play_sound(self) -> None:
+        chosen = self.bell_sound.currentData() or ""
+        target = Path(chosen) if chosen else (
+            Path(__file__).resolve().parent.parent.parent / "assets" / "bell.wav")
+        if not target.exists():
+            QMessageBox.information(self, "Not found", f"{target} is not there.")
+            return
+
+        def work():
+            try:
+                speechmod.play(target, blocking=False)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     def _pick_file(self, target: QLineEdit, title: str,
                    filt: str = "All files (*)") -> None:
         start = str(Path(target.text()).parent) if target.text() else str(Path.home())

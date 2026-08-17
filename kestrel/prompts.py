@@ -65,6 +65,7 @@ def build_system(
     dialect: str,
     persona: str = "",
     has_plan_tools: bool = False,
+    has_canvas: bool = False,
 ) -> str:
     v = budget.verbosity
     parts: list[str] = []
@@ -87,6 +88,13 @@ def build_system(
     header = "Tools:" if v == 0 else "## Tools\n"
     parts.append(f"{header}\n{tool_listing}")
 
+    if has_canvas:
+        # Two lines in a tight budget, the full explanation when there is room:
+        # the habit of pasting code into the reply is a strong one and a short
+        # instruction does not displace it.
+        parts.append("Write code with canvas_write, not in your reply."
+                     if v <= 1 else CANVAS_RULE)
+
     if skills:
         chars = 70 if v == 0 else (110 if v == 1 else 200)
         lines = index_lines(skills, budget.max_skills, chars)
@@ -104,6 +112,17 @@ def build_system(
         parts.append("## How to work\n\n" + "\n".join(f"- {r}" for r in rules))
 
     return "\n\n".join(parts).strip()
+
+
+CANVAS_RULE = """## The canvas
+
+There is a shared editor on screen. Write code there with canvas_write rather
+than pasting it into your reply: the user can read, edit and save it, and you can
+change one part of it later with canvas_edit instead of reproducing the whole
+thing. Read it with canvas_read first — the line numbers it shows are the ones
+canvas_edit expects.
+
+Your reply should say what you did and why, not repeat the code."""
 
 
 _PLAN_RULES = [

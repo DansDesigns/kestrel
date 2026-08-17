@@ -710,9 +710,8 @@ class MainWindow(QWidget):
         # Vertical icon rail: nine horizontal tabs never fitted a narrow panel,
         # and elided text ("S...", "M...") named nothing. Icons plus tooltips
         # stay legible at any width.
-        self._icon_tabs = ["projects", "status", "models", "params", "persona",
-                           "cluster", "canvas", "tools", "skills", "memory",
-                           "speech", "backend"]
+        self._icon_tabs = ["status", "models", "params", "persona", "cluster",
+                           "tools", "skills", "memory", "speech", "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -724,7 +723,6 @@ class MainWindow(QWidget):
         self.projects_panel.projectChosen.connect(self.open_project)
         self.projects_panel.sessionChosen.connect(self.open_session)
         self.projects_panel.newSession.connect(self.new_session)
-        left.addTab(self.projects_panel, "Projects")
         left.addTab(self._status_tab(), "Status")
 
         left.addTab(self._lazy(lambda: ModelsPanel(self.cfg), self._wire_models),
@@ -742,8 +740,6 @@ class MainWindow(QWidget):
         self.cluster.logLine.connect(self.busy_overlay.update_detail)
         left.addTab(self.cluster, "Cluster")
 
-        left.addTab(self._lazy(lambda: CanvasPanel(self.cfg), self._wire_canvas),
-                    "Canvas")
         left.addTab(self._lazy(ToolsPanel, self._wire_tools), "Tools")
         left.addTab(self._lazy(lambda: SkillsPanel(self.cfg), self._wire_skills),
                     "Skills")
@@ -839,9 +835,15 @@ class MainWindow(QWidget):
 
         # right: activity and server log
         right = QTabWidget()
-        self._right_tabs = ["plan", "activity", "log", "monitor"]
+        # The right column is what the work produces: the project it belongs
+        # to, the code being written, the plan, and the machinery underneath.
+        self._right_tabs = ["projects", "canvas", "plan", "activity", "log",
+                            "monitor"]
         right.setTabBar(IconTabBar(self._right_tabs))
         right.setTabPosition(QTabWidget.East)
+        right.addTab(self.projects_panel, "Projects")
+        right.addTab(self._lazy(lambda: CanvasPanel(self.cfg), self._wire_canvas),
+                     "Canvas")
         self.plan_panel = PlanPanel()
         right.addTab(self.plan_panel, "Plan")
         right.addTab(self.activity, "Activity")
@@ -1255,13 +1257,16 @@ class MainWindow(QWidget):
             # Collapse to exactly the icon rail: the tabs stay reachable, and
             # the pane border is dropped so no empty sliver shows beside them.
             self._set_collapsed_style(panel, True)
+            panel.setMinimumWidth(0)     # so it can shrink to the rail
             sizes[centre] += sizes[index] - rail
             sizes[index] = rail
         else:
             self._set_collapsed_style(panel, False)
-            # Never restore below the width the contents need; the centre column
-            # has the most room to give.
+            # A minimum Qt enforces during the drag, rather than a correction
+            # applied after it: clamping in splitterMoved fights the drag and
+            # loses, which is why the floor did not hold.
             floor = self._content_min(panel)
+            panel.setMinimumWidth(floor)
             wanted = max(floor, self._panel_widths.get(key, 340))
             restored = min(wanted, max(floor, sizes[centre] - 240))
             sizes[index] = restored
@@ -1301,7 +1306,10 @@ class MainWindow(QWidget):
         return needed
 
     def _clamp_panels(self, *_args) -> None:
-        """Stop a drag leaving a panel narrower than its contents."""
+        """Keep each expanded panel's minimum in step with what it now holds."""
+        for key, panel in (("left", self.left_panel), ("right", self.right_panel)):
+            if not self._collapsed.get(key):
+                panel.setMinimumWidth(self._content_min(panel))
         sizes = self.splitter.sizes()
         changed = False
         for key, index, panel in (("left", 0, self.left_panel),
@@ -2059,7 +2067,9 @@ class MainWindow(QWidget):
         """
         if not self.cfg.bell_on_finish:
             return
-        bell = Path(__file__).resolve().parent.parent.parent / "assets" / "bell.wav"
+        chosen = (self.cfg.bell_sound or "").strip()
+        bell = (Path(chosen) if chosen else
+                Path(__file__).resolve().parent.parent.parent / "assets" / "bell.wav")
         if not bell.exists():
             return
 
@@ -2193,8 +2203,10 @@ class MainWindow(QWidget):
         carry on when it is closed and reopening shows them still running.
         """
         if self.downloads is None:
+            from ..config import config_dir
             self.downloads = dlmod.DownloadManager(
-                max_concurrent=2, token=self.cfg.hf_token)
+                max_concurrent=2, token=self.cfg.hf_token,
+                state_path=config_dir() / "downloads.json")
         if self.downloads_window is None:
             self.downloads_window = DownloadsWindow(self.cfg, self.downloads, self)
             self.downloads_window.statusLine.connect(self._status)
