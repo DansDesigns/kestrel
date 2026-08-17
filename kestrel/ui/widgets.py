@@ -1488,16 +1488,22 @@ class MonitorStrip(QWidget):
     """A one-line reading of the machine, under the context gauge.
 
     The system tab shows this properly; this is for the glance you take while
-    something is running, without leaving whatever tab you are on. It uses the
-    whitespace beside the gauge rather than taking any room from it.
+    something is running, without leaving whatever tab you are on. It fills the
+    width that was empty beside the gauge rather than taking any room from it.
+
+    Each reading is laid out along the line — name, bar, figure — because a bar
+    is for noticing and a figure is for reading, and stacking them wastes the
+    height while making both smaller.
     """
+
+    GAP = 18
+    HEIGHT = 22
 
     def __init__(self, monitor, parent=None):
         super().__init__(parent)
         self.monitor = monitor
-        self.setFixedHeight(16)
-        self._text = ""
-        self._parts: list[tuple[str, str, float]] = []   # label, colour, fraction
+        self.setFixedHeight(self.HEIGHT)
+        self._parts: list[tuple[str, str, float, str]] = []
 
     def refresh(self) -> None:
         try:
@@ -1521,10 +1527,11 @@ class MonitorStrip(QWidget):
                               f"{gpu.mem_used_mb / 1024:.1f}/"
                               f"{budget / 1024:.0f} GB"))
             if gpu.temperature >= 0:
-                parts.append(("gpu°", theme.ALERT, min(1.0, gpu.temperature / 100),
+                parts.append(("gpu temp", theme.ALERT,
+                              min(1.0, gpu.temperature / 100),
                               f"{gpu.temperature:.0f}°C"))
         if sample.cpu_temp >= 0:
-            parts.append(("cpu°", theme.ALERT, min(1.0, sample.cpu_temp / 100),
+            parts.append(("cpu temp", theme.ALERT, min(1.0, sample.cpu_temp / 100),
                           f"{sample.cpu_temp:.0f}°C"))
         self._parts = parts
         self.update()
@@ -1534,21 +1541,38 @@ class MonitorStrip(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setFont(mono_font(8))
+        p.setFont(mono_font(10))
         metrics = p.fontMetrics()
+
+        # Every reading gets an equal share of the line, so the bars are as long
+        # as the space allows rather than as short as the text needs.
+        count = len(self._parts)
+        # Each label and figure takes only the room its own text needs; whatever
+        # is left over is divided equally between the bars. Padding every label
+        # to the width of the longest would leave "cpu" adrift from its bar.
+        labels = [metrics.horizontalAdvance(l) + 7 for l, *_ in self._parts]
+        values = [metrics.horizontalAdvance(v) + 7 for *_, v in self._parts]
+        usable = self.width() - 12 - self.GAP * (count - 1)
+        bar_width = max(28.0, (usable - sum(labels) - sum(values)) / count)
+
         x = 6.0
-        for label, colour, fraction, value in self._parts:
-            text = f"{label} {value}"
-            width = metrics.horizontalAdvance(text) + 10
-            bar = max(0.0, min(1.0, fraction))
-            # A quiet bar behind the number: the figure is what is read, the
-            # fill is for noticing something without reading anything.
-            p.setPen(Qt.NoPen)
-            p.fillRect(QRectF(x, 11, width - 8, 3), QColor(theme.PANEL_HI))
-            p.fillRect(QRectF(x, 11, (width - 8) * bar, 3), QColor(colour))
+        middle = self.height() / 2
+        for index, (label, colour, fraction, value) in enumerate(self._parts):
+            label_width, value_width = labels[index], values[index]
             p.setPen(QColor(theme.TEXT_DIM))
-            p.drawText(QRectF(x, -1, width, 12), Qt.AlignLeft | Qt.AlignVCenter, text)
-            x += width + 8
+            p.drawText(QRectF(x, 0, label_width, self.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
+            bar_x = x + label_width
+            p.setPen(Qt.NoPen)
+            p.fillRect(QRectF(bar_x, middle - 3, bar_width, 6),
+                       QColor(theme.PANEL_HI))
+            fill = max(0.0, min(1.0, fraction)) * bar_width
+            if fill > 0:
+                p.fillRect(QRectF(bar_x, middle - 3, fill, 6), QColor(colour))
+            p.setPen(QColor(theme.TEXT))
+            p.drawText(QRectF(bar_x + bar_width + 7, 0, value_width, self.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, value)
+            x += label_width + bar_width + value_width + self.GAP
             if x > self.width():
                 break
         p.end()
