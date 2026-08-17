@@ -777,7 +777,7 @@ class MainWindow(QWidget):
         centre.setMinimumWidth(240)
         centre.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         clay = QVBoxLayout(centre)
-        clay.setContentsMargins(0, 0, 0, 0)
+        clay.setContentsMargins(8, 0, 8, 0)
         clay.addWidget(self.chat, 1)
 
         self.typing = TypingIndicator()
@@ -886,6 +886,9 @@ class MainWindow(QWidget):
         for index, stretch in ((0, 0), (1, 1), (2, 0)):
             splitter.setStretchFactor(index, stretch)
         splitter.setChildrenCollapsible(True)
+        # A wider grip, and room either side of it: text running right up to the
+        # divider reads as though it has been cut off.
+        splitter.setHandleWidth(10)
         splitter.setSizes([340, 620, 300])
         self.splitter = splitter
         self._panel_widths = {"left": 360, "right": 300}

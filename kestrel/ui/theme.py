@@ -353,8 +353,15 @@ QSlider::handle:horizontal {{
     margin: -6px 0; border-radius: 7px;
 }}
 QSlider::handle:horizontal:hover {{ background: {hover}; }}
-QSplitter::handle {{ background: {line}; }}
-QSplitter::handle:hover {{ background: {dim}; }}
+/* The grip is a thin line centred in a wider hit area, so it is easy to catch
+   without a thick bar down the middle of the window. */
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:horizontal {{
+    background: transparent;
+    border-left: 1px solid {line};
+    margin: 0px 4px;
+}}
+QSplitter::handle:horizontal:hover {{ border-left: 1px solid {amber}; }}
 QStatusBar {{ background: {panel}; border-top: 1px solid {line}; }}
 QProgressBar {{ background: {panel}; border: 1px solid {line}; border-radius: 4px; }}
 QProgressBar::chunk {{ background: {amber}; border-radius: 3px; }}

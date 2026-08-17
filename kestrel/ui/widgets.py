@@ -276,7 +276,12 @@ class ChatView(QTextBrowser):
         self.setOpenLinks(False)          # QTextBrowser: handle them ourselves
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self._anchor_clicked)
-        self.verticalScrollBar().valueChanged.connect(self._scrolled)
+        bar = self.verticalScrollBar()
+        bar.valueChanged.connect(self._scrolled)
+        bar.rangeChanged.connect(self._range_changed)
+        # Dragging the bar itself is a gesture; the bar moving on its own is not.
+        bar.sliderPressed.connect(lambda: setattr(self, "_user_scrolled", True))
+        bar.actionTriggered.connect(lambda _a: setattr(self, "_user_scrolled", True))
 
     def _anchor_clicked(self, url) -> None:
         text = url.toString()
@@ -301,15 +306,42 @@ class ChatView(QTextBrowser):
                 f'margin-top:6px;">' + '  ·  '.join(parts) + '</div>')
 
     def _scrolled(self, value: int) -> None:
-        # Writing text moves the cursor, which moves the scrollbar. Those moves
-        # are ours, not the reader's, and must not be mistaken for intent.
-        if self._writing:
+        """Only a gesture detaches the view.
+
+        Guarding on "are we writing" is not enough: a bubble laid out after the
+        write, a wrapped line, an image sizing itself — each grows the range
+        moments later, leaving the value where it was and the view apparently
+        scrolled up. That is what kept dropping follow a second or two after it
+        was switched back on.
+
+        So the position is not what decides. A wheel, a drag of the scrollbar,
+        or a navigation key decides; everything else is the document moving
+        under a reader who did not ask for it.
+        """
+        if self._writing or not self._user_scrolled:
             return
+        self._user_scrolled = False
         bar = self.verticalScrollBar()
         at_bottom = value >= bar.maximum() - 4
         if at_bottom != self.following:
             self.following = at_bottom
             self.followChanged.emit(at_bottom)
+
+    def _range_changed(self, _minimum: int, maximum: int) -> None:
+        """Keep the newest text in view as the document grows."""
+        if self.following:
+            self.verticalScrollBar().setValue(maximum)
+
+    # -- what counts as the reader moving ------------------------------------
+    def wheelEvent(self, event):  # noqa: N802
+        self._user_scrolled = True
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown,
+                           Qt.Key_Home, Qt.Key_End):
+            self._user_scrolled = True
+        super().keyPressEvent(event)
 
     def set_following(self, follow: bool) -> None:
         self.following = follow
@@ -332,6 +364,7 @@ class ChatView(QTextBrowser):
             bar.setValue(self._saved_scroll)
         self._saved_scroll = None
         self._writing = False
+        self._user_scrolled = False
 
     def _mark_scroll(self) -> None:
         self._writing = True
