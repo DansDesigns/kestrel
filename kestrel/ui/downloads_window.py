@@ -349,15 +349,20 @@ class DownloadsWindow(QWidget):
         lay.setSpacing(6)
 
         self.queue = QTreeWidget()
-        self.queue.setHeaderLabels(["File", "Progress", "State", ""])
+        # Three columns, not four: the state and its detail belong together,
+        # and a fourth column on a narrow window is one that gets cut off.
+        self.queue.setHeaderLabels(["File", "Progress", "Status"])
         self.queue.setObjectName("Flush")
         self.queue.setFont(mono_font(10))
         self.queue.setRootIsDecorated(False)
         self.queue.setUniformRowHeights(True)
         header = self.queue.header()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for column in (1, 2, 3):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.queue.setColumnWidth(0, 260)
+        self.queue.setColumnWidth(1, 110)
         self.queue.currentItemChanged.connect(lambda *_: self._sync_buttons())
         lay.addWidget(self.queue, 1)
 
@@ -421,7 +426,7 @@ class DownloadsWindow(QWidget):
         if self.queue.topLevelItemCount() != len(jobs):
             self.queue.clear()
             for job in jobs:
-                item = QTreeWidgetItem(["", "", "", ""])
+                item = QTreeWidgetItem(["", "", ""])
                 item.setData(0, Qt.UserRole, job.id)
                 self.queue.addTopLevelItem(item)
                 bar = QProgressBar()
@@ -439,8 +444,7 @@ class DownloadsWindow(QWidget):
             item.setData(0, Qt.UserRole, job.id)
             item.setText(0, job.name)
             item.setToolTip(0, f"{job.repo}/{job.filename}\n→ {job.dest}")
-            item.setText(2, job.state)
-            item.setText(3, job.summary())
+            item.setText(2, f"{job.state} · {job.summary()}")
             colour = colours.get(job.state)
             item.setForeground(2, QColor(colour or theme.TEXT))
             bar = self.queue.itemWidget(item, 1)

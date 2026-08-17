@@ -15,7 +15,8 @@ from __future__ import annotations
 PALETTES = {
     "dark": {
         "INK": "#101720", "PANEL": "#18212C", "PANEL_HI": "#1F2A37",
-        "LINE": "#243140", "TEXT": "#C9D4DF", "TEXT_DIM": "#6E7E8E",
+        "LINE": "#243140", "TEXT": "#C9D4DF", "TEXT_DIM": "#93A3B4",
+        "SELECT": "#2C4257", "ON_SELECT": "#EAF1F7",
         "AMBER": "#E8A33D", "SIGNAL": "#57B894", "ALERT": "#D96A5A",
         "VIOLET": "#8C7BC7", "PLAN": "#4FA3C7", "THINK": "#6FB3C9",
         "FREE": "#1B2530", "BUBBLE_YOU": "#1E3A46", "BUBBLE_AI": "#1C2531",
@@ -24,7 +25,8 @@ PALETTES = {
     },
     "light": {
         "INK": "#F4F1EA", "PANEL": "#FFFFFF", "PANEL_HI": "#EAE5DA",
-        "LINE": "#D6CFC1", "TEXT": "#1E252E", "TEXT_DIM": "#6B7480",
+        "LINE": "#D6CFC1", "TEXT": "#1E252E", "TEXT_DIM": "#5A6470",
+        "SELECT": "#CFE0EC", "ON_SELECT": "#12202C",
         "AMBER": "#A0670F", "SIGNAL": "#2E7D5B", "ALERT": "#B23B28",
         "VIOLET": "#584AA0", "PLAN": "#1F6F92", "THINK": "#12667C",
         "FREE": "#E4DED2", "BUBBLE_YOU": "#DCEBF2", "BUBBLE_AI": "#FFFFFF",
@@ -49,6 +51,7 @@ base_size = 13
 # rebinds them, and anything that reads them at paint time picks up the change.
 INK = PANEL = PANEL_HI = LINE = TEXT = TEXT_DIM = ""
 AMBER = SIGNAL = ALERT = VIOLET = PLAN = THINK = FREE = ""
+SELECT = ON_SELECT = ""
 BUBBLE_YOU = BUBBLE_AI = BUBBLE_THINK = ""
 ON_ACCENT = ACCENT_HOVER = ""
 
@@ -93,6 +96,7 @@ def stylesheet() -> str:
     p = PALETTES[current]
     ink, panel, panel_hi = p["INK"], p["PANEL"], p["PANEL_HI"]
     line, text, dim = p["LINE"], p["TEXT"], p["TEXT_DIM"]
+    select, on_select = p["SELECT"], p["ON_SELECT"]
     amber, on_accent, hover = p["AMBER"], p["ON_ACCENT"], p["ACCENT_HOVER"]
     alert = p["ALERT"]
     return f"""
@@ -182,6 +186,10 @@ QTabBar::tab:selected {{ color: {text}; border-bottom-color: {amber}; }}
 QTreeWidget, QListWidget, QTableWidget {{
     background: {panel}; border: 1px solid {line}; border-radius: 6px;
     alternate-background-color: {panel_hi};
+    /* Both halves of a selection are set: inheriting the text colour from the
+       unselected state is how a highlighted row ends up unreadable. */
+    selection-background-color: {select};
+    selection-color: {on_select};
 }}
 /* Inside an already-framed panel, a second frame wastes a margin on each side
    and reads as a box within a box. */
@@ -189,7 +197,10 @@ QTreeWidget#Flush, QTextEdit#Flush, QListWidget#Flush {{
     border: none; border-radius: 0; background: {ink};
 }}
 QTreeWidget::item, QListWidget::item {{ padding: 5px 4px; }}
-QTreeWidget::item:selected, QListWidget::item:selected {{ background: {line}; }}
+QTreeWidget::item:selected, QListWidget::item:selected {{
+    background: {select}; color: {on_select};
+}}
+QTreeWidget::item:hover, QListWidget::item:hover {{ background: {panel_hi}; }}
 QHeaderView::section {{
     background: {panel_hi}; color: {dim}; border: none;
     border-bottom: 1px solid {line}; padding: 5px;

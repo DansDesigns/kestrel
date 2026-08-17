@@ -11,6 +11,7 @@ nothing is lost by stopping, closing the window, or losing the connection.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -90,13 +91,64 @@ class DownloadManager:
     the job list whenever it is opened again.
     """
 
-    def __init__(self, max_concurrent: int = 2, token: str = ""):
+    def __init__(self, max_concurrent: int = 2, token: str = "",
+                 state_path: str | Path = ""):
         self.jobs: list[Job] = []
         self.max_concurrent = max(1, max_concurrent)
         self.token = token
         self.on_change: Callable[[], None] | None = None
+        self.state_path = Path(state_path) if state_path else None
         self._next_id = 0
         self._lock = threading.Lock()
+        self._restore()
+
+    # -- surviving a restart -------------------------------------------------
+    def _restore(self) -> None:
+        """Bring back downloads that were still going when Kestrel closed.
+
+        The bytes are already on disk in a `.part` file; without this the only
+        record of what they belong to dies with the process, and a half-finished
+        30 GB download becomes an orphan nobody can resume.
+        """
+        if self.state_path is None or not self.state_path.exists():
+            return
+        try:
+            raw = json.loads(self.state_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        for entry in raw.get("jobs", []):
+            try:
+                self._next_id += 1
+                job = Job(id=self._next_id, repo=entry["repo"],
+                          filename=entry["filename"], dest=entry["dest"],
+                          total=int(entry.get("total") or 0),
+                          state=PAUSED)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if job.final_path.exists():
+                continue                      # it finished after all
+            if not job.part_path.exists():
+                continue                      # nothing to resume from
+            job.done = job.part_path.stat().st_size
+            # Restored paused, never running: resuming is a decision, and a
+            # download that starts itself on launch is a surprise.
+            self.jobs.append(job)
+
+    def save_state(self) -> None:
+        if self.state_path is None:
+            return
+        keep = [{"repo": j.repo, "filename": j.filename, "dest": j.dest,
+                 "total": j.total, "done": j.done}
+                for j in self.jobs if j.state in ACTIVE]
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            if keep:
+                self.state_path.write_text(json.dumps({"jobs": keep}, indent=1),
+                                           "utf-8")
+            else:
+                self.state_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # -- queue ---------------------------------------------------------------
     def add(self, repo: str, filename: str, dest: str) -> Job:
@@ -248,6 +300,7 @@ class DownloadManager:
             self._schedule()
 
     def _changed(self) -> None:
+        self.save_state()
         if self.on_change:
             try:
                 self.on_change()
