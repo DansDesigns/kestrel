@@ -5,6 +5,7 @@ import fnmatch
 import re
 from pathlib import Path
 
+from ..canvas import BUFFER
 from . import DANGER_SAFE, DANGER_WRITE, Param, Tool, ToolResult
 
 MAX_READ_LINES = 400
@@ -34,6 +35,10 @@ class Sandbox:
             return str(p.relative_to(self.root))
         except ValueError:
             return str(p)
+
+
+CODE_SUFFIXES = {".py", ".js", ".ts", ".rs", ".go", ".c", ".h", ".cpp",
+                 ".java", ".rb", ".sh", ".sql", ".css", ".html", ".jsx", ".md"}
 
 
 def register(reg, workspace: Path) -> None:
@@ -81,6 +86,14 @@ def register(reg, workspace: Path) -> None:
         existed = f.exists()
         f.write_text(content, "utf-8")
         verb = "Overwrote" if existed else "Wrote"
+        # Code written to a file also appears in the canvas, so the user can see
+        # and edit what was produced without opening it. The model may not have
+        # used the canvas; the result belongs there regardless.
+        if f.suffix.lower() in CODE_SUFFIXES and len(content) > 40:
+            try:
+                BUFFER.set(content, language=f.suffix.lstrip("."), name=f.name)
+            except Exception:
+                pass
         return ToolResult(f"{verb} {sb.rel(f)} ({len(content)} chars, "
                           f"{content.count(chr(10)) + 1} lines).")
 

@@ -92,8 +92,11 @@ def build_system(
         # Two lines in a tight budget, the full explanation when there is room:
         # the habit of pasting code into the reply is a strong one and a short
         # instruction does not displace it.
-        parts.append("Write code with canvas_write, not in your reply."
-                     if v <= 1 else CANVAS_RULE)
+        # Even at the tightest budget this is worth its tokens: the habit of
+        # pasting code into a reply is strong, and a vaguer instruction loses.
+        parts.append("Code goes in the canvas: canvas_write, canvas_edit, then "
+                     "canvas_save. Never paste code into your reply."
+                     if v == 0 else CANVAS_RULE)
 
     if skills:
         chars = 70 if v == 0 else (110 if v == 1 else 200)
@@ -114,15 +117,21 @@ def build_system(
     return "\n\n".join(parts).strip()
 
 
-CANVAS_RULE = """## The canvas
+CANVAS_RULE = """## Writing code
 
-There is a shared editor on screen. Write code there with canvas_write rather
-than pasting it into your reply: the user can read, edit and save it, and you can
-change one part of it later with canvas_edit instead of reproducing the whole
-thing. Read it with canvas_read first — the line numbers it shows are the ones
-canvas_edit expects.
+Code goes in the canvas, never in your reply.
 
-Your reply should say what you did and why, not repeat the code."""
+The canvas is a shared editor on screen. To write or change a file:
+
+1. canvas_read to see what is there, with line numbers
+2. canvas_write for a new file, or canvas_edit to change lines start..end
+3. canvas_save to write it to disk at the right path
+
+Never paste a file into your reply, and do not build one up with write_file:
+the user cannot edit either of those while you work, and reproducing a whole
+file to change one line wastes the context you need for the task.
+
+Your reply says what you did and why. The code is already on screen."""
 
 
 _PLAN_RULES = [

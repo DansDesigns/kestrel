@@ -171,7 +171,8 @@ class ModelsPanel(UiThread, QWidget):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["", "Model", "Quant", "Size", "Ctx"])
         self.tree.setFont(mono_font(10))
-        stretch_columns(self.tree, first_stretch=1)
+        # The star column is a marker: fixed, no handle, no share of the width.
+        stretch_columns(self.tree, first_stretch=1, fixed={0: 22})
         # Flush to the panel: a framed, rounded box inside an already-framed
         # panel wastes a margin on each side and reads as a box within a box.
         self.tree.setObjectName("Flush")
@@ -181,7 +182,6 @@ class ModelsPanel(UiThread, QWidget):
         self.tree.setIndentation(0)
         self.tree.setRootIsDecorated(False)
         self.tree.header().setStretchLastSection(False)
-        self.tree.setColumnWidth(0, 22)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree.currentItemChanged.connect(self._show_detail)
         self.tree.itemDoubleClicked.connect(lambda *_: self.load_selected())

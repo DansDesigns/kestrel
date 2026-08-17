@@ -5,6 +5,8 @@ line-addressed, so changing one function does not mean reproducing the file.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..canvas import BUFFER
 from . import DANGER_SAFE, DANGER_WRITE, Param, Registry, Tool, ToolResult
 
@@ -28,6 +30,26 @@ def register(reg: Registry) -> None:
             return ToolResult(message, ok=False)
         return ToolResult(f"{message} — {len(BUFFER.lines())} line(s) total.")
 
+    def canvas_save(path: str = "") -> ToolResult:
+        root = Path(reg.workspace).expanduser().resolve()
+        target = (root / (path or BUFFER.name)).resolve()
+        try:
+            target.relative_to(root)         # the workspace is the boundary
+        except ValueError:
+            return ToolResult("that path is outside the workspace", ok=False)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(BUFFER.text, "utf-8")
+        except OSError as e:
+            return ToolResult(f"could not save: {e}", ok=False)
+        return ToolResult(f"Saved the canvas to {target.name} "
+                          f"({len(BUFFER.lines())} lines).")
+
+    reg.add(Tool("canvas_save", "Write the canvas to a file in the workspace.",
+                 [Param("path", "string", "Where to save it, e.g. src/main.py.")],
+                 canvas_save, DANGER_WRITE,
+                 detail="The normal way to finish a piece of code: write it in "
+                        "the canvas, then save it here."))
     reg.add(Tool("canvas_read", "Read the shared canvas, with line numbers.",
                  [Param("start", "integer", "First line, default 1."),
                   Param("end", "integer", "Last line, default the end.")],

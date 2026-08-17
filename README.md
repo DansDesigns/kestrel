@@ -299,9 +299,14 @@ a span of them:
 | `canvas_write` | Replace it entirely |
 | `canvas_append` | Add to the end |
 | `canvas_edit` | Replace lines *start..end* |
+| `canvas_save` | Write it to a file in the workspace |
 
-The prompt tells the model to write code there rather than in its reply, and to
-say what it did instead of repeating it. Edits from either side appear on the
+The prompt gives the model the whole sequence — read, write or edit, save — and
+tells it plainly never to paste a file into a reply or build one up with
+`write_file`. Neither can be edited while it works, and reproducing a file to
+change one line spends the context the task needs. As a backstop, code written
+with `write_file` is mirrored into the canvas anyway: the result belongs on
+screen whether or not the model took the intended route. Edits from either side appear on the
 other immediately.
 
 **The canvas** is a scratch editor. Working on code through a chat
@@ -1095,8 +1100,11 @@ not something to make the interface wait for.
 palettes, and a selected row has its own background *and* its own text colour —
 inheriting the unselected colour is how a highlighted row ends up unreadable.
 
-**Table columns.** The last column takes the remaining width rather than
-whatever is left over. A divider handle sits on a column's right edge, so a
+**Table columns** behave as tables should: drag a divider and that column
+changes while the others stay put. More than one stretching section is what
+makes a table feel wrong — Qt keeps them in proportion, so widening one visibly
+shrinks the rest. Exactly one section stretches, the last, which takes the
+remaining width rather than whatever is left over. A divider handle sits on a column's right edge, so a
 last column sized to its contents can be clipped with no way to drag it wider.
 
 **Themes.** Two palettes, switchable from the top bar and remembered between

@@ -869,6 +869,7 @@ class MainWindow(QWidget):
         self._content_mins: dict[int, int] = {}
         splitter.splitterMoved.connect(self._clamp_panels)
         left.currentChanged.connect(lambda _i: self._clamp_panels())
+        left.currentChanged.connect(lambda _i: QTimer.singleShot(60, self._watch_subtabs))
         right.currentChanged.connect(lambda _i: self._clamp_panels())
         left.tabBar().tabBarClicked.connect(
             lambda i: self._tab_clicked("left", i))
@@ -1037,6 +1038,24 @@ class MainWindow(QWidget):
         self._status(f"Heard: {text[:80]}")
 
     @Slot(str)
+    @Slot(int, int)
+    def _label_step(self, step: int, total: int) -> None:
+        """Say where the work is, in the plan's terms.
+
+        The loop counter and the checklist are different things, and showing
+        "step 8" beside a four-step plan invites the reading that they are the
+        same one.
+        """
+        agent = self.worker.agent
+        todo = agent.todo if agent is not None else None
+        if todo is not None and todo.items and not todo.complete:
+            done, count = todo.progress
+            current = todo.current
+            where = f" — {current.text[:38]}" if current else ""
+            self.typing.set_label(f"step {done + 1} of {count}{where}")
+            return
+        self.typing.set_label("thinking" if step == 1 else f"working ({step})")
+
     def _speak_chunk(self, chunk: str) -> None:
         """Feed the reply to the speaker as it is written."""
         if self.cfg.speech.tts_enabled:
@@ -1285,11 +1304,24 @@ class MainWindow(QWidget):
         page = panel.currentWidget()
         needed = 0
         if page is not None:
+            # Walk down to whatever is visible: a panel may hold its own tabs,
+            # and findChild would otherwise measure the first scroll area in
+            # the tree rather than the page on screen. That is why Sampling —
+            # the widest of the Params tabs — never set the floor.
             inner = page
-            if isinstance(page, QScrollArea) and page.widget() is not None:
-                inner = page.widget()
-            elif page.findChild(QScrollArea) is not None:
-                area = page.findChild(QScrollArea)
+            for _ in range(4):
+                if isinstance(inner, QTabWidget) and inner.currentWidget():
+                    inner = inner.currentWidget()
+                    continue
+                nested = inner.findChild(QTabWidget) if inner else None
+                if nested is not None and nested.currentWidget():
+                    inner = nested.currentWidget()
+                    continue
+                break
+            if isinstance(inner, QScrollArea) and inner.widget() is not None:
+                inner = inner.widget()
+            elif inner is not None and inner.findChild(QScrollArea) is not None:
+                area = inner.findChild(QScrollArea)
                 inner = area.widget() or area
             # Whichever is larger: a preferred size can be smaller than the
             # width the contents actually refuse to go below, and it is the
@@ -1304,6 +1336,19 @@ class MainWindow(QWidget):
         needed = max(PANEL_MIN_WIDTH, min(620, needed), remembered)
         self._content_mins[key] = needed
         return needed
+
+    def _watch_subtabs(self) -> None:
+        """Re-measure when a panel's own tabs are switched.
+
+        Params holds several pages of different widths; the floor has to follow
+        whichever is showing, not whichever happened to be first.
+        """
+        page = self.left_panel.currentWidget()
+        nested = page.findChild(QTabWidget) if page else None
+        if nested is not None and not nested.property("watched"):
+            nested.setProperty("watched", True)
+            nested.currentChanged.connect(lambda _i: self._clamp_panels())
+        self._clamp_panels()
 
     def _clamp_panels(self, *_args) -> None:
         """Keep each expanded panel's minimum in step with what it now holds."""
@@ -1437,9 +1482,7 @@ class MainWindow(QWidget):
         self.worker.thinking.connect(self._count_token)
         self.worker.toolCall.connect(
             lambda name, _a: self.typing.set_label(f"running {name}"))
-        self.worker.stepped.connect(
-            lambda step, total: self.typing.set_label(
-                "thinking" if step == 1 else f"working, step {step}"))
+        self.worker.stepped.connect(self._label_step)
         self.worker.toolCall.connect(self.on_tool_call)
         self.worker.toolResult.connect(self.on_tool_result)
         self.worker.assistantDone.connect(self.on_assistant)

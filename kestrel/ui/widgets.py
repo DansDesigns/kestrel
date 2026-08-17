@@ -283,10 +283,16 @@ class ChatView(QTextBrowser):
         action, _, index = rest.partition(":")
         number = int(index or 0)
         if action == "thought":
-            # Toggling is a view change, so the transcript is simply redrawn
-            # from its own record rather than patched in place.
+            # Toggling is a view change, so the transcript is redrawn from its
+            # own record. The reply currently streaming is not in that record —
+            # it has not finished — so it is carried across by hand, or it
+            # vanishes mid-sentence while tokens are still arriving.
             self._thought_open ^= {number}
+            live = self.streamed_text() if self._anchor is not None else ""
             self.rerender()
+            if live:
+                self.begin_assistant()
+                self.stream(live)
             return
         self.actionRequested.emit(action, number)
 
@@ -487,7 +493,7 @@ class ChatView(QTextBrowser):
         self._thought_line(head, tokens, approx, full)
 
     def _thought_line(self, head: str, tokens: int, approx: str = "",
-                      full: str = "") -> None:
+                      full: str = "") -> None:   # noqa: D401
         """A thought, shown short with the whole of it one click away.
 
         The trace is the most interesting thing in the transcript when something
@@ -809,33 +815,35 @@ class CollapseHandle(QWidget):
         p.end()
 
 
-def stretch_columns(tree, first_stretch: int = 0) -> None:
-    """Let a tree fill, and shrink to, whatever width it is given.
+def stretch_columns(tree, first_stretch: int = 0, fixed: dict | None = None) -> None:
+    """Ordinary table behaviour: drag a divider, that column changes, others do not.
 
-    Fixed pixel columns look deliberate at the width they were chosen for and
-    wrong at every other. `ResizeToContents` alone is no better: it grows to the
-    longest cell and drags the panel wider, so the elastic column takes the
-    slack and the rest are merely allowed to shrink.
+    More than one Stretch column is what makes a table feel wrong to use — Qt
+    keeps every stretching section in proportion, so widening one visibly
+    shrinks the rest, which is the opposite of what dragging a divider is
+    supposed to do. Exactly one section stretches: the last, which absorbs the
+    leftover width. Everything else is Interactive and stays where it is put.
     """
     header = tree.header()
-    # The last section takes the slack. Without this the rightmost column is
-    # whatever is left over, which on a narrow panel is nothing at all — and a
-    # divider handle sits on a column's right edge, so there is no way to drag
-    # the last one wider either.
     header.setStretchLastSection(True)
-    header.setMinimumSectionSize(24)
+    header.setMinimumSectionSize(20)
     header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    header.setCascadingSectionResizes(False)
     last = tree.columnCount() - 1
+    fixed = fixed or {}
     for i in range(tree.columnCount()):
+        if i in fixed:
+            # A marker column has one right width and no use for a handle.
+            header.setSectionResizeMode(i, QHeaderView.Fixed)
+            tree.setColumnWidth(i, fixed[i])
+            continue
         if i == last:
-            mode = QHeaderView.Stretch          # absorbs the remaining width
-        elif i == first_stretch:
-            mode = QHeaderView.Stretch
-        else:
-            mode = QHeaderView.Interactive
-        header.setSectionResizeMode(i, mode)
-        if mode is QHeaderView.Interactive:
-            tree.resizeColumnToContents(i)
+            continue                       # stretchLastSection covers it
+        header.setSectionResizeMode(i, QHeaderView.Interactive)
+        tree.resizeColumnToContents(i)
+        if i == first_stretch:
+            # The text column gets whatever room is going spare at the start.
+            tree.setColumnWidth(i, max(tree.columnWidth(i), 160))
     tree.setMinimumWidth(0)
     tree.setSizePolicy(QSizePolicy.Ignored, tree.sizePolicy().verticalPolicy())
     tree.setTextElideMode(Qt.ElideRight)
