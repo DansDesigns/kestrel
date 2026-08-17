@@ -7,6 +7,7 @@ be a poor trade for saving them a `git pull`.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,12 +21,20 @@ VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 def local_version() -> str:
-    """The installed version, from the package and nowhere else.
+    """The installed version.
 
-    Kestrel does not ship a version.txt of its own: the file this compares
-    against is yours, in your repository, and writing one here would overwrite
-    the number you set every time the package is updated.
+    Read from version.txt when there is one — that file belongs to whoever
+    maintains the checkout, and it is the number they set. Kestrel never
+    creates or overwrites it; it only reports what is there, falling back to the
+    package constant when the file is absent.
     """
+    candidate = project_root() / "version.txt"
+    try:
+        first = candidate.read_text("utf-8").strip().splitlines()[0].strip()
+        if first:
+            return first
+    except (OSError, IndexError):
+        pass
     from . import __version__
     return __version__
 
@@ -145,63 +154,120 @@ def _git_pull(say) -> tuple[bool, str]:
 
 
 def _replace_from_archive(say) -> tuple[bool, str]:
+    """Download to a temporary folder, then replace this installation.
+
+    Nothing is written into the program folder until a complete, verified copy
+    exists somewhere else — an update that fails halfway through should leave
+    the working installation alone rather than a half-replaced one. The backup
+    goes to the system temporary directory rather than beside the program, so
+    updating does not leave a litter of folders next to it.
+    """
     import io
     import shutil
+    import tempfile
     import zipfile
 
     import requests
 
     root = project_root()
-    for branch in BRANCHES:
-        say(f"downloading {branch}…")
-        try:
-            response = requests.get(ZIP_URL.format(repo=REPO, branch=branch),
-                                    timeout=180)
-        except Exception as e:
-            return False, f"download failed: {e}"
-        if response.status_code == 404:
-            continue
-        if not response.ok:
-            return False, f"download failed: HTTP {response.status_code}"
+    staging = Path(tempfile.mkdtemp(prefix="kestrel-update-"))
+    try:
+        payload = None
+        for branch in BRANCHES:
+            say(f"downloading {branch}…")
+            try:
+                response = requests.get(ZIP_URL.format(repo=REPO, branch=branch),
+                                        timeout=180)
+            except Exception as e:
+                return False, f"download failed: {e}"
+            if response.status_code == 404:
+                continue
+            if not response.ok:
+                return False, f"download failed: HTTP {response.status_code}"
+            payload = response.content
+            break
+        if payload is None:
+            return False, "no published branch was found"
 
+        say(f"unpacking {len(payload) // 1024:,} KB")
         try:
-            archive = zipfile.ZipFile(io.BytesIO(response.content))
+            zipfile.ZipFile(io.BytesIO(payload)).extractall(staging)
         except zipfile.BadZipFile:
             return False, "the download was not a valid archive"
 
-        names = archive.namelist()
-        if not names:
-            return False, "the archive was empty"
-        prefix = names[0].split("/")[0] + "/"
+        # Find the copy of Kestrel inside, wherever the archive chose to put it.
+        source = None
+        for candidate in [staging, *staging.iterdir()]:
+            if (candidate / "kestrel" / "__init__.py").is_file():
+                source = candidate
+                break
+        if source is None:
+            return False, "the archive does not look like Kestrel"
 
-        backup = root.parent / f"{root.name}.backup"
+        backup = Path(tempfile.mkdtemp(prefix="kestrel-backup-"))
         say(f"backing up to {backup}")
         try:
-            if backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
-            shutil.copytree(root, backup,
-                            ignore=shutil.ignore_patterns(*KEEP))
+            shutil.copytree(root, backup / "kestrel-previous",
+                            ignore=shutil.ignore_patterns(*KEEP),
+                            dirs_exist_ok=True)
         except OSError as e:
             return False, f"could not back up the current copy: {e}"
 
-        say("unpacking")
+        say("replacing files")
         written = 0
-        try:
-            for name in names:
-                if name.endswith("/") or not name.startswith(prefix):
-                    continue
-                relative = name[len(prefix):]
-                if not relative or relative.split("/")[0] in KEEP:
-                    continue
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(name) as source, open(target, "wb") as out:
-                    shutil.copyfileobj(source, out)
-                written += 1
-        except OSError as e:
-            return False, (f"unpacking failed after {written} files: {e}. "
-                           f"The previous copy is at {backup}.")
-        say(f"{written} files written")
-        return True, (f"Updated {written} files. Restart Kestrel to run the new "
-                      f"version. The previous copy is kept at {backup}.")
-    return False, "no published branch was found"
+        for item in source.rglob("*"):
+            relative = item.relative_to(source)
+            if relative.parts and relative.parts[0] in KEEP:
+                continue
+            target = root / relative
+            try:
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, target)
+                    written += 1
+            except OSError as e:
+                return False, (f"stopped after {written} files: {e}. Nothing "
+                               f"else was changed; the previous copy is at "
+                               f"{backup}.")
+        # A module dropped upstream has to go, or it stays importable and the
+        # old code keeps running. Only inside the package directory, which is
+        # entirely ours — anything the user put elsewhere is left alone.
+        removed = 0
+        package = root / "kestrel"
+        if package.is_dir() and (source / "kestrel").is_dir():
+            for existing in package.rglob("*.py"):
+                relative = existing.relative_to(root)
+                if not (source / relative).exists():
+                    try:
+                        existing.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        say(f"{written} files written"
+            + (f", {removed} removed" if removed else ""))
+        return True, (f"Updated {written} files to {local_version()}. "
+                      f"The previous copy is at {backup} and can be deleted "
+                      "once you are happy.")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def restart() -> bool:
+    """Relaunch Kestrel and leave. Returns False if it could not be done."""
+    import subprocess
+    import sys
+
+    root = project_root()
+    launcher = root / ("run.bat" if os.name == "nt" else "run.sh")
+    try:
+        if launcher.exists():
+            command = ([str(launcher)] if os.name == "nt"
+                       else ["bash", str(launcher)])
+        else:
+            command = [sys.executable, "-m", "kestrel"]
+        subprocess.Popen(command, cwd=str(root), close_fds=True)
+        return True
+    except Exception:
+        return False

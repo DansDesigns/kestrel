@@ -252,6 +252,7 @@ class ChatView(QTextBrowser):
         self._thought_no = 0
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
+        self._pending_toggle = False
         # Links are the only clickable element a text document offers; buttons
         # cannot be embedded in the flow.
         self.setOpenLinks(False)
@@ -268,6 +269,7 @@ class ChatView(QTextBrowser):
         self._thought_no = 0
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
+        self._pending_toggle = False
         # Links are the only clickable element QTextEdit offers; buttons cannot
         # be embedded in the document flow.
         self.setOpenLinks(False)          # QTextBrowser: handle them ourselves
@@ -283,16 +285,7 @@ class ChatView(QTextBrowser):
         action, _, index = rest.partition(":")
         number = int(index or 0)
         if action == "thought":
-            # Toggling is a view change, so the transcript is redrawn from its
-            # own record. The reply currently streaming is not in that record —
-            # it has not finished — so it is carried across by hand, or it
-            # vanishes mid-sentence while tokens are still arriving.
-            self._thought_open ^= {number}
-            live = self.streamed_text() if self._anchor is not None else ""
-            self.rerender()
-            if live:
-                self.begin_assistant()
-                self.stream(live)
+            self.toggle_thought(number)
             return
         self.actionRequested.emit(action, number)
 
@@ -492,6 +485,27 @@ class ChatView(QTextBrowser):
         self._record("_thought_line", head, tokens, approx, full)
         self._thought_line(head, tokens, approx, full)
 
+    def toggle_thought(self, number: int) -> None:
+        """Expand or collapse one reasoning trace.
+
+        Expanding redraws the transcript from its own record, and a reply that
+        is still streaming is not in that record — it has not finished. Rather
+        than trying to carry the live text across the rebuild, the rebuild
+        simply waits: the toggle is remembered and applied the moment the turn
+        ends. Nothing touches the document while tokens are arriving.
+        """
+        self._thought_open ^= {number}
+        if self.streaming() or self._thought_anchor is not None:
+            self._pending_toggle = True
+            return
+        self.rerender()
+
+    def apply_pending_toggle(self) -> None:
+        """Called when a turn ends, in case a toggle was waiting for it."""
+        if getattr(self, "_pending_toggle", False):
+            self._pending_toggle = False
+            self.rerender()
+
     def _thought_line(self, head: str, tokens: int, approx: str = "",
                       full: str = "") -> None:   # noqa: D401
         """A thought, shown short with the whole of it one click away.
@@ -585,7 +599,15 @@ class ChatView(QTextBrowser):
                                  theme.AMBER, theme.BUBBLE_AI))
 
     def rerender(self) -> None:
-        """Rebuild the transcript in the current palette."""
+        """Rebuild the transcript in the current palette.
+
+        Refused while a reply is streaming: the live text is not in the record
+        being replayed, so rebuilding would delete it mid-sentence while tokens
+        are still arriving.
+        """
+        if self.streaming() or self._thought_anchor is not None:
+            self._pending_toggle = True
+            return
         entries = list(self._log)
         self._replaying = True
         try:

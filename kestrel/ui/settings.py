@@ -14,7 +14,8 @@ import threading
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox,
                                QMessageBox,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton,
@@ -466,9 +467,34 @@ class SettingsDialog(QDialog):
     def _update_finished(self, ok: bool) -> None:
         self.install_btn.setEnabled(True)
         self.install_btn.setVisible(not ok)
-        if ok:
-            QMessageBox.information(self, "Update installed",
-                                    "Restart Kestrel to run the new version.")
+        if not ok:
+            return
+        self.version_label.setText(f"Installed version {update.local_version()}")
+        box = QMessageBox(self)
+        box.setWindowTitle("Update installed")
+        box.setText("Kestrel has been updated.")
+        box.setInformativeText(
+            "The new version runs from the next start. Restarting now closes "
+            "this window and opens it again.")
+        now = box.addButton("Restart now", QMessageBox.AcceptRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.setDefaultButton(now)
+        box.exec()
+        if box.clickedButton() is now:
+            self.restart_now()
+
+    def restart_now(self) -> None:
+        """Relaunch, then close this one — in that order, so a failure to start
+        the new copy leaves the old one running rather than nothing at all."""
+        if not update.restart():
+            QMessageBox.warning(self, "Could not restart",
+                                "Start Kestrel again yourself to pick up the "
+                                "new version.")
+            return
+        window = self.window()
+        self.accept()
+        QApplication.instance().quit()
+        _ = window
 
     # -- helpers --------------------------------------------------------------
     def _pick_sound(self) -> None:

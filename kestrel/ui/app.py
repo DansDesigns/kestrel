@@ -2126,6 +2126,7 @@ class MainWindow(QWidget):
     @Slot()
     def on_turn_finished(self) -> None:
         self.typing.stop()
+        self.chat.apply_pending_toggle()
         self._ring()
         agent = self.worker.agent
         unfinished = bool(agent is not None and agent.todo is not None

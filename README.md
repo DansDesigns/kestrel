@@ -278,7 +278,14 @@ order, and the model's own alternative plan was never substituted.
 Completed steps carry a green tick, and a step longer than the panel wraps onto
 as many lines as it needs rather than being cut off.
 
-**Thinking blocks collapse.** A trace is the most interesting thing in the
+**Thinking blocks collapse.** Expanding one redraws the transcript from its own
+record — and a reply still streaming is not in that record, because it has not
+finished. Rather than trying to carry the live text across a rebuild, the
+rebuild waits: clicking while the model is writing is remembered and applied the
+moment the turn ends. Nothing touches the document while tokens are arriving,
+which also protects a palette change made mid-reply.
+
+ A trace is the most interesting thing in the
 transcript when something has gone wrong and the least interesting when it has
 not, so it shows its opening with the whole of it one click away.
 
@@ -1422,11 +1429,26 @@ finds it useful enough to put something back.
 
 **Settings → Updates** compares the version published at
 `github.com/dansdesigns/kestrel/version.txt` with the one installed and reports
-the difference. When one is available an **Install the update** button appears. A git checkout is
-pulled, which keeps your history; any other copy is replaced from the published
-archive with a backup of what was there first. Settings, memory, conversations
-and projects live outside the program folder and are never touched. Kestrel does
-not ship a `version.txt` of its own — the file it compares against is yours.
+the difference. The installed version is read from `version.txt` when there is one — that file
+belongs to whoever maintains the checkout, and Kestrel only ever reports it,
+never writes it. Without one it falls back to the package constant.
+
+When an update is available an **Install the update** button appears. A git
+checkout is pulled, which keeps your history. Any other copy is replaced from
+the published archive:
+
+1. downloaded and unpacked into a temporary folder
+2. checked that it actually contains Kestrel
+3. the current copy backed up to the system temporary directory — not beside the
+   program, which is what left a litter of folders next to it
+4. files replaced in place, and modules dropped upstream removed so an old one
+   cannot stay importable
+5. a restart offered, which launches the new copy before closing this one
+
+Nothing is written into the program folder until a complete, verified copy
+exists elsewhere, so an update that fails partway leaves the working
+installation alone. `.git`, `.venv` and your settings, memory, conversations and
+projects are never touched.
 
 ---
 
