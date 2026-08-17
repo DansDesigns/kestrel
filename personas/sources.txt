@@ -1,0 +1,1 @@
+thank you to https://github.com/scorbo2/ai-playground/tree/master/agents for supplying the agent personas
