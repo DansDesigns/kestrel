@@ -134,6 +134,8 @@ class Config:
     auto_install_llama: bool = False
     auto_start_server: bool = True    # start the backend if nothing is serving
     theme: str = "dark"               # dark | light
+    ui_tint: str = "slate"            # surface hue
+    ui_accent: str = "amber"          # buttons and highlights
     show_tool_detail: bool = False    # show arguments and raw output in the transcript
     favourite_models: list[str] = field(default_factory=list)
     canvas_enabled: bool = True       # give the model the shared code canvas

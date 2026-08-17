@@ -22,10 +22,11 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import speech as speechmod
+from . import theme
 from .. import update
 from ..cluster import find_rpc_binary, find_server_binary
 from ..config import Config, default_skill_dirs
-from .widgets import Field
+from .widgets import Field, swatch
 
 LEGACY_RASTER = {"8514oem", "courier", "fixedsys", "modern", "ms sans serif",
                  "ms serif", "roman", "script", "small fonts", "system", "terminal"}
@@ -45,6 +46,16 @@ def _row(*widgets) -> QWidget:
     for x in widgets:
         lay.addWidget(x)
     return w
+
+
+def _swatch(colour: str):
+    return swatch(colour)
+
+
+def _heading(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("Section")
+    return label
 
 
 class SettingsDialog(QDialog):
@@ -191,6 +202,35 @@ class SettingsDialog(QDialog):
         note.setObjectName("Dim")
         lay.addWidget(note)
 
+        lay.addWidget(_heading("Colour"))
+
+        self.tint = QComboBox()
+        for key, (label, hue) in theme.TINTS.items():
+            self.tint.addItem(_swatch(hue or theme.PALETTES[self.cfg.theme]["PANEL"]),
+                              label, key)
+        self.tint.setCurrentIndex(max(0, self.tint.findData(self.cfg.ui_tint)))
+        self.tint.currentIndexChanged.connect(self._preview_colours)
+        lay.addWidget(Field("Interface tint", self.tint,
+                            "Shifts the surfaces towards a hue. Text and the "
+                            "status colours are left alone."))
+
+        self.accent = QComboBox()
+        for key, (label, dark, light) in theme.ACCENTS.items():
+            self.accent.addItem(_swatch(dark if self.cfg.theme == "dark" else light),
+                                label, key)
+        self.accent.setCurrentIndex(max(0, self.accent.findData(self.cfg.ui_accent)))
+        self.accent.currentIndexChanged.connect(self._preview_colours)
+        lay.addWidget(Field("Buttons and highlights", self.accent,
+                            "Each is adjusted until its label can be read on "
+                            "it, so none of them come out illegible."))
+
+        self.colour_preview = QLabel("")
+        self.colour_preview.setMinimumHeight(46)
+        self.colour_preview.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.colour_preview)
+        self._preview_colours()
+
+        lay.addWidget(_heading("Type"))
         families = [f for f in QFontDatabase.families() if _usable_font(f)]
         fixed = [f for f in families if QFontDatabase.isFixedPitch(f)]
 
@@ -242,6 +282,8 @@ class SettingsDialog(QDialog):
         self.cfg.mono_font = self.mono_font_box.currentData() or ""
         self.cfg.font_size = self.font_size.value()
         self.cfg.theme = self.theme_box.currentText()
+        self.cfg.ui_tint = self.tint.currentData() or "slate"
+        self.cfg.ui_accent = self.accent.currentData() or "amber"
         self.cfg.save()
         self.appearance_changed = True
         self._note("Appearance applied")
@@ -497,6 +539,20 @@ class SettingsDialog(QDialog):
         _ = window
 
     # -- helpers --------------------------------------------------------------
+    def _preview_colours(self) -> None:
+        """Show the chosen pair before committing to them."""
+        tint = self.tint.currentData() or "slate"
+        accent = self.accent.currentData() or "amber"
+        palette = theme.build_palette(self.cfg.theme, tint, accent)
+        self.colour_preview.setText(
+            f"  {theme.TINTS[tint][0]} · {theme.ACCENTS[accent][0]}  ")
+        self.colour_preview.setStyleSheet(
+            f"background: {palette['PANEL']};"
+            f"color: {palette['TEXT']};"
+            f"border: 1px solid {palette['LINE']};"
+            f"border-left: 8px solid {palette['AMBER']};"
+            "border-radius: 6px; padding: 8px;")
+
     def _pick_sound(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Chime sound", str(Path.home()),

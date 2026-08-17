@@ -1114,6 +1114,19 @@ shrinks the rest. Exactly one section stretches, the last, which takes the
 remaining width rather than whatever is left over. A divider handle sits on a column's right edge, so a
 last column sized to its contents can be clipped with no way to drag it wider.
 
+**Colour.** Two palettes, each with a surface **tint** (slate, blue, teal,
+green, orange, red, violet, graphite) and an **accent** for buttons and
+highlights (amber, blue, teal, green, orange, red, violet, pink) — 128
+combinations in all. They are derived rather than hand-written: one neutral
+palette per mode, mixed a little way towards a hue. Writing a dozen full
+palettes by hand would drift out of step the moment a role changed.
+
+Only surfaces take the tint. Text and the status colours are left alone, since
+tinting those is how an interface becomes hard to read. Each accent is adjusted
+until its own label can be read on it — a mid-tone fill sits too close to both
+black and white, and a button label at 2.3:1 is decoration rather than writing.
+Every combination clears 4.5:1.
+
 **Themes.** Two palettes, switchable from the top bar and remembered between
 sessions. Light is a paper-and-bronze daylight face rather than an inverted dark
 theme — inverting a dark palette produces glare and washes the accent colour out,
@@ -1441,8 +1454,9 @@ the published archive:
 2. checked that it actually contains Kestrel
 3. the current copy backed up to the system temporary directory — not beside the
    program, which is what left a litter of folders next to it
-4. files replaced in place, and modules dropped upstream removed so an old one
-   cannot stay importable
+4. files overwritten in place — the folder structure is preserved and **nothing
+   is deleted**, so notes, scratch files and modules of your own survive an
+   update
 5. a restart offered, which launches the new copy before closing this one
 
 Nothing is written into the program folder until a complete, verified copy

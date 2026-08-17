@@ -231,25 +231,14 @@ def _replace_from_archive(say) -> tuple[bool, str]:
                 return False, (f"stopped after {written} files: {e}. Nothing "
                                f"else was changed; the previous copy is at "
                                f"{backup}.")
-        # A module dropped upstream has to go, or it stays importable and the
-        # old code keeps running. Only inside the package directory, which is
-        # entirely ours — anything the user put elsewhere is left alone.
-        removed = 0
-        package = root / "kestrel"
-        if package.is_dir() and (source / "kestrel").is_dir():
-            for existing in package.rglob("*.py"):
-                relative = existing.relative_to(root)
-                if not (source / relative).exists():
-                    try:
-                        existing.unlink()
-                        removed += 1
-                    except OSError:
-                        pass
-        say(f"{written} files written"
-            + (f", {removed} removed" if removed else ""))
-        return True, (f"Updated {written} files to {local_version()}. "
-                      f"The previous copy is at {backup} and can be deleted "
-                      "once you are happy.")
+        # Nothing is deleted. Overwriting in place keeps the folder structure
+        # and anything living alongside it — notes, scratch files, a branch of
+        # your own — which matters more than tidying away a module that was
+        # dropped upstream.
+        say(f"{written} files written, nothing removed")
+        return True, (f"Updated {written} files to {local_version()}. Existing "
+                      "files were overwritten in place; nothing was deleted. "
+                      f"The previous copy is at {backup}.")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

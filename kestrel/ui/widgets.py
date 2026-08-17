@@ -13,6 +13,7 @@ import re
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
+                           QPixmap,
                            QPainter, QPen,
                            QPixmap, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
@@ -1470,3 +1471,14 @@ def _first_lines(text: str, count: int = 2, limit: int = 220) -> str:
     lines = [l for l in str(text or "").splitlines() if l.strip()]
     head = " ".join(lines[:count])
     return head[:limit] + ("…" if len(head) > limit else "")
+
+
+def swatch(colour: str, size: int = 14) -> QIcon:
+    """A small block of colour, for naming a colour in a list."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(colour))
+    painter = QPainter(pixmap)
+    painter.setPen(QPen(QColor(0, 0, 0, 60)))
+    painter.drawRect(0, 0, size - 1, size - 1)
+    painter.end()
+    return QIcon(pixmap)

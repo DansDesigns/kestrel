@@ -938,7 +938,9 @@ class MainWindow(QWidget):
     def apply_appearance(self) -> None:
         """Re-apply palette and fonts, then rebuild anything holding either."""
         sheet = theme.apply(self.cfg.theme, ui=self.cfg.ui_font,
-                            mono=self.cfg.mono_font, size=self.cfg.font_size)
+                        mono=self.cfg.mono_font, size=self.cfg.font_size,
+                        tint_name=self.cfg.ui_tint,
+                        accent_name=self.cfg.ui_accent)
         appl = QApplication.instance()
         if appl is not None:
             appl.setStyleSheet(sheet)
@@ -2353,7 +2355,8 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Kestrel")
     cfg = Config.load()
     app.setStyleSheet(theme.apply(cfg.theme, ui=cfg.ui_font, mono=cfg.mono_font,
-                                  size=cfg.font_size))
+                                  size=cfg.font_size, tint_name=cfg.ui_tint,
+                                  accent_name=cfg.ui_accent))
     install_wheel_guard(app)
     window_holder = {}
 
