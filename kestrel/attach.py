@@ -56,6 +56,20 @@ class Attachment:
             bits.append(f"{len(self.text.splitlines())} lines")
         return " · ".join(bits)
 
+    def as_image_part(self) -> dict | None:
+        """The OpenAI-style image part llama.cpp accepts with an mmproj loaded."""
+        import base64
+        import mimetypes
+        if self.kind != "image":
+            return None
+        try:
+            data = base64.b64encode(self.path.read_bytes()).decode("ascii")
+        except OSError:
+            return None
+        mime = mimetypes.guess_type(str(self.path))[0] or "image/png"
+        return {"type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"}}
+
     def block(self) -> str:
         """How it is put to the model."""
         if self.kind == "image":
@@ -229,6 +243,26 @@ def _image_size(p: Path) -> str:
     except (OSError, struct.error):
         pass
     return "size unknown"
+
+
+def message_content(items: list[Attachment], text: str, vision: bool):
+    """Build the message for a turn with attachments.
+
+    With a vision model the pictures go as pictures; without one they are named
+    and described, because silently dropping them is how a model ends up
+    answering a question about an image it was never shown.
+    """
+    images = [i for i in items if i.kind == "image"] if vision else []
+    written = [i for i in items if i not in images]
+    body = "\n\n".join(x for x in (text, summarise(written)) if x.strip())
+    if not images:
+        return body
+    parts: list = [{"type": "text", "text": body}]
+    for item in images:
+        part = item.as_image_part()
+        if part:
+            parts.append(part)
+    return parts
 
 
 def summarise(items: list[Attachment]) -> str:

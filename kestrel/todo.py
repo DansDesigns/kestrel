@@ -41,11 +41,16 @@ def normalise_status(value: str) -> str:
 class TodoItem:
     id: int
     text: str
+    parent: int = 0          # 0 for a stage, otherwise the stage it belongs to
+    auto: bool = False       # recorded by Kestrel, not planned by the model
     status: str = TODO
     note: str = ""
 
-    def line(self, current: bool = False) -> str:
-        s = f"{self.id}. [{MARKS.get(self.status, ' ')}] {self.text}"
+    def line(self, current: bool = False, label: str = "", depth: int = 0) -> str:
+        # The label is what the model is asked to quote back, so it is what is
+        # shown; the id is an implementation detail it never needs to see.
+        indent = "   " * depth
+        s = f"{indent}{label or self.id}. [{MARKS.get(self.status, ' ')}] {self.text}"
         if self.note:
             s += f" — {self.note}"
         if current:
@@ -83,6 +88,15 @@ class TodoList:
 
     MARKDOWN_MARKS = {TODO: " ", DOING: ">", DONE: "x", BLOCKED: "!"}
 
+    def outline(self) -> list[tuple[str, TodoItem, int]]:
+        """(label, item, depth) in reading order."""
+        rows = []
+        for stage in self.stages():
+            rows.append((self.label_for(stage), stage, 0))
+            for kid in self.children(stage.id):
+                rows.append((self.label_for(kid), kid, 1))
+        return rows
+
     def markdown(self) -> str:
         """The plan as a document, not a data structure.
 
@@ -95,10 +109,11 @@ class TodoList:
         stamp = time.strftime("%Y-%m-%d %H:%M")
         lines.append(f"Updated {stamp} · {done} of {total} done")
         lines.append("")
-        for item in self.items:
+        for label, item, depth in self.outline():
             mark = self.MARKDOWN_MARKS.get(item.status, " ")
             note = f" — {item.note}" if item.note else ""
-            lines.append(f"- [{mark}] {item.text}{note}")
+            indent = "  " * depth
+            lines.append(f"{indent}- [{mark}] **{label}** {item.text}{note}")
         if any(i.status == BLOCKED for i in self.items):
             lines += ["", "`!` marks a step that could not be completed."]
         if any(i.status == DOING for i in self.items):
@@ -137,20 +152,59 @@ class TodoList:
     # -- mutation ------------------------------------------------------------
     def set_plan(self, steps, title: str = "") -> "TodoList":
         """Replace the plan. Accepts a list, or a newline/numbered string, since
-        small models produce all three shapes."""
+        small models produce all three shapes.
+
+        Nothing is destroyed by a call that produces nothing. Emptying the list
+        before parsing meant a garbled or empty set of steps wiped a working
+        plan and left the model with nothing to follow.
+        """
+        parsed = [text for text in _as_steps(steps) if text.strip()]
+        if not parsed:
+            return self
         self.items = []
-        for text in _as_steps(steps):
+        for text in parsed:
             self.items.append(TodoItem(id=len(self.items) + 1, text=text))
         self.title = title or self.title
         self._touch()
         return self
 
-    def add(self, text: str) -> TodoItem:
+    def add(self, text: str, parent: int = 0, auto: bool = False) -> TodoItem:
         item = TodoItem(id=(max((i.id for i in self.items), default=0) + 1),
-                        text=" ".join(str(text).split())[:300])
-        self.items.append(item)
+                        text=" ".join(str(text).split())[:300],
+                        parent=int(parent or 0), auto=bool(auto))
+        if item.parent:
+            # Sub-steps sit directly under their stage, so the list reads in
+            # the order the work happens rather than the order it was added.
+            last = max((index for index, existing in enumerate(self.items)
+                        if existing.id == item.parent
+                        or existing.parent == item.parent),
+                       default=len(self.items) - 1)
+            self.items.insert(last + 1, item)
+        else:
+            self.items.append(item)
         self._touch()
         return item
+
+    def _settle_parents(self) -> None:
+        """A stage follows its sub-steps.
+
+        Marking every part of a stage done and then having to mark the stage
+        itself is bookkeeping the model should not have to remember, and
+        forgetting it is what leaves a plan looking unfinished when it is not.
+        """
+        for stage in self.stages():
+            kids = self.children(stage.id)
+            if not kids:
+                continue
+            # Automatic sub-steps are a record of what happened, not a list of
+            # what must happen. A stage is finished when its planned parts are,
+            # or it would close the moment the first tool ran.
+            planned = [k for k in kids if not k.auto]
+            if planned and all(k.status == DONE for k in planned):
+                stage.status = DONE
+            elif (any(k.status in (DOING, DONE) for k in kids)
+                  and stage.status == TODO):
+                stage.status = DOING
 
     def update(self, item_id: int, status: str = "", note: str = "") -> TodoItem | None:
         item = self.get(item_id)
@@ -161,10 +215,12 @@ class TodoList:
             # Only one step is ever in flight.
             if item.status == DOING:
                 for other in self.items:
-                    if other is not item and other.status == DOING:
+                    if (other is not item and other.status == DOING
+                            and other.id != item.parent):
                         other.status = TODO
         if note:
             item.note = " ".join(str(note).split())[:160]
+        self._settle_parents()
         self._touch()
         return item
 
@@ -209,6 +265,51 @@ class TodoList:
         self.items = []
         self.title = ""
         self._touch()
+
+    # -- structure -----------------------------------------------------------
+    def stages(self) -> list[TodoItem]:
+        return [i for i in self.items if not i.parent]
+
+    def children(self, stage_id: int) -> list[TodoItem]:
+        return [i for i in self.items if i.parent == stage_id]
+
+    def label_for(self, item: TodoItem) -> str:
+        """"1", "1a", "1b" — the stage number, then a letter per sub-step.
+
+        Labels are positional and recomputed on every read, so moving or
+        removing a step renumbers what is shown without touching the ids the
+        model has already used.
+        """
+        if not item.parent:
+            return str(self.stages().index(item) + 1)
+        parent = self.get(item.parent)
+        if parent is None:
+            return str(item.id)
+        base = self.stages().index(parent) + 1
+        position = self.children(parent.id).index(item)
+        return f"{base}{chr(ord('a') + position)}" if position < 26 else \
+            f"{base}.{position + 1}"
+
+    def by_label(self, label: str) -> TodoItem | None:
+        """Find a step by what the interface calls it, or by its id."""
+        wanted = str(label).strip().lower()
+        for item in self.items:
+            if self.label_for(item).lower() == wanted:
+                return item
+        try:
+            return self.get(int(wanted))
+        except (TypeError, ValueError):
+            return None
+
+    def stage_of(self, item: TodoItem) -> TodoItem | None:
+        return self.get(item.parent) if item.parent else item
+
+    def stage_progress(self, stage_id: int) -> tuple[int, int]:
+        kids = self.children(stage_id)
+        if not kids:
+            item = self.get(stage_id)
+            return (1 if item and item.status == DONE else 0), 1
+        return sum(1 for k in kids if k.status == DONE), len(kids)
 
     def _touch(self) -> None:
         self.updated = time.time()
@@ -256,8 +357,19 @@ class TodoList:
         return next((i for i in self.items if i.status == TODO), None)
 
     @property
+    def leaves(self) -> list[TodoItem]:
+        """The steps that represent actual work.
+
+        A stage with sub-steps is a heading; counting it as well as its parts
+        would make a three-part stage look like four pieces of work.
+        """
+        return [i for i in self.items
+                if not i.auto and (i.parent or not self.children(i.id))]
+
+    @property
     def progress(self) -> tuple[int, int]:
-        return sum(1 for i in self.items if i.status == DONE), len(self.items)
+        leaves = self.leaves
+        return sum(1 for i in leaves if i.status == DONE), len(leaves)
 
     @property
     def complete(self) -> bool:
@@ -274,8 +386,8 @@ class TodoList:
             head += f" — {self.title}"
         current = self.current
         lines = [head + ":"]
-        for item in self.items:
-            lines.append(item.line(current is item))
+        for label, item, depth in self.outline():
+            lines.append(item.line(current is item, label=label, depth=depth))
         block = "\n".join(lines)
 
         if counter is not None and token_budget and counter.count(block) > token_budget:

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS memories (
     text       TEXT NOT NULL,
     kind       TEXT NOT NULL DEFAULT 'fact',
     scope      TEXT NOT NULL DEFAULT '',
+    tier       TEXT NOT NULL DEFAULT 'project',
     source     TEXT NOT NULL DEFAULT '',
     importance INTEGER NOT NULL DEFAULT 3,
     pinned     INTEGER NOT NULL DEFAULT 0,
@@ -65,12 +66,64 @@ END;
 """
 
 
+PROJECT, GLOBAL, PERSONAL = "project", "global", "personal"
+
+
+def _fts_probe(db) -> str:
+    """A word that certainly appears, to test whether the index has been built."""
+    row = db.execute("SELECT text FROM memories ORDER BY id LIMIT 1").fetchone()
+    words = re.findall(r"[A-Za-z]{4,}", row["text"] if row else "")
+    return words[0] if words else "the"
+
+
+def classify(text: str) -> str:
+    """Guess which tier a remembered fact belongs to.
+
+    Automatic capture cannot ask, and filing everything under the project is
+    how "the user is called Dan" ends up invisible in the next folder. The
+    signals are blunt on purpose: a wrong guess is correctable in the Memory
+    tab, an unaskable question is not.
+    """
+    low = " ".join(str(text or "").lower().split())
+    personal = ("the user", "user's", "user is", "user prefers", "user likes",
+                "user works", "user has", "their name", "he prefers",
+                "she prefers", "they prefer", "my name", "i prefer", "call me")
+    if any(term in low for term in personal):
+        return PERSONAL
+    universal = ("kestrel", "llama.cpp", "llama-server", "installed at",
+                 "lives in c:", "lives at", "is located at", "on this machine",
+                 "python is", "the shell tool", "gguf files", "models are kept",
+                 "workspace root", "by default")
+    if any(term in low for term in universal):
+        return GLOBAL
+    return PROJECT
+
+
+TIERS = (PROJECT, GLOBAL, PERSONAL)
+TIER_LABELS = {
+    PROJECT: "this project only",
+    GLOBAL: "how things work anywhere",
+    PERSONAL: "about you",
+}
+
+# What each tier is for, in the model's words as well as the reader's.
+TIER_HELP = {
+    PROJECT: "facts about the project in this folder — its layout, its "
+             "decisions, what has been tried",
+    GLOBAL: "things true wherever Kestrel runs — where tools live, how a "
+            "project is laid out, what Kestrel itself can do",
+    PERSONAL: "things about the person — their name, how they like to work, "
+              "what they have told you about themselves",
+}
+
+
 @dataclass
 class Memory:
     id: int
     text: str
     kind: str = "fact"
     scope: str = ""
+    tier: str = PROJECT
     source: str = ""
     importance: int = 3
     pinned: bool = False
@@ -112,10 +165,18 @@ class MemoryStore:
         self.fts = True
         with self._lock:
             self.db.executescript(SCHEMA)
+            # Before anything indexes or queries the column: an existing store
+            # has no `tier`, and CREATE INDEX on a missing column fails outright
+            # rather than being skipped.
+            self._add_tier_column()
+            # Filed before the full-text triggers exist: updating rows once they
+            # do fires them against an index that has not been built yet.
+            self._file_untiered()
             try:
                 self.db.executescript(FTS_SCHEMA)
             except sqlite3.OperationalError:
                 self.fts = False       # build without FTS5; LIKE search instead
+            self._backfill_fts()
             self.db.commit()
 
     def close(self) -> None:
@@ -127,6 +188,7 @@ class MemoryStore:
     # -- writing --------------------------------------------------------------
     def remember(self, text: str, kind: str = "fact", importance: int = 3,
                  source: str = "", pinned: bool = False, scope: str | None = None,
+                 tier: str = "",
                  enforce: bool = True) -> tuple[int, bool]:
         """Store a memory. Returns (id, created_new). Re-stating an existing
         memory bumps its importance rather than adding a duplicate.
@@ -145,7 +207,13 @@ class MemoryStore:
             text = text[:2000]
         kind = kind if kind in KINDS else "fact"
         importance = max(1, min(5, int(importance)))
-        sc = self.scope if scope is None else scope
+        tier = tier if tier in TIERS else classify(text)
+        # The tier decides the scope, whatever the caller passed. A global or
+        # personal memory is stored without one: tying it to the folder it
+        # happened to be learnt in is exactly what makes it invisible from
+        # everywhere else, which is the problem tiers exist to solve.
+        sc = "" if tier in (GLOBAL, PERSONAL) else (
+            self.scope if scope is None else scope)
         norm = normalise(text)
         now = time.time()
         with self._lock:
@@ -160,9 +228,10 @@ class MemoryStore:
                 self.db.commit()
                 return int(row["id"]), False
             cur = self.db.execute(
-                "INSERT INTO memories(text,kind,scope,source,importance,pinned,created,"
-                "last_used,norm) VALUES(?,?,?,?,?,?,?,?,?)",
-                (text, kind, sc, source, importance, int(pinned), now, now, norm))
+                "INSERT INTO memories(text,kind,scope,tier,source,importance,"
+                "pinned,created,last_used,norm) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (text, kind, sc, tier, source, importance, int(pinned), now,
+                 now, norm))
             self.db.commit()
             return int(cur.lastrowid), True
 
@@ -189,6 +258,19 @@ class MemoryStore:
     def set_pinned(self, memory_id: int, pinned: bool) -> bool:
         return self.update(memory_id, pinned=int(pinned))
 
+    def clear_tier(self, tier: str, scope: str | None = None) -> int:
+        """Forget one tier. Used to start a project over without losing what
+        Kestrel knows about the machine or about the person."""
+        sc = self.scope if scope is None else scope
+        with self._lock:
+            if tier == PROJECT:
+                cur = self.db.execute(
+                    "DELETE FROM memories WHERE tier=? AND scope=?", (tier, sc))
+            else:
+                cur = self.db.execute("DELETE FROM memories WHERE tier=?", (tier,))
+            self.db.commit()
+            return cur.rowcount
+
     def clear(self, scope: str | None = None) -> int:
         sc = self.scope if scope is None else scope
         with self._lock:
@@ -197,21 +279,96 @@ class MemoryStore:
             return cur.rowcount
 
     # -- reading --------------------------------------------------------------
-    def all(self, scope: str | None = None, limit: int = 500) -> list[Memory]:
+    def all(self, scope: str | None = None, limit: int = 500,
+            tier: str = "") -> list[Memory]:
         sc = self.scope if scope is None else scope
+        clause = "(scope=? OR scope='')"
+        params: list = [sc]
+        if tier in TIERS:
+            clause += " AND tier=?"
+            params.append(tier)
+        params.append(limit)
         with self._lock:
             rows = self.db.execute(
-                "SELECT * FROM memories WHERE scope=? OR scope='' "
+                f"SELECT * FROM memories WHERE {clause} "
                 "ORDER BY pinned DESC, importance DESC, created DESC LIMIT ?",
-                (sc, limit)).fetchall()
+                params).fetchall()
         return [_row(r) for r in rows]
 
-    def count(self, scope: str | None = None) -> int:
+    def count(self, scope: str | None = None, tier: str = "") -> int:
         sc = self.scope if scope is None else scope
+        clause = "(scope=? OR scope='')"
+        params: list = [sc]
+        if tier in TIERS:
+            clause += " AND tier=?"
+            params.append(tier)
         with self._lock:
             return int(self.db.execute(
-                "SELECT COUNT(*) c FROM memories WHERE scope=? OR scope=''",
-                (sc,)).fetchone()["c"])
+                f"SELECT COUNT(*) c FROM memories WHERE {clause}",
+                params).fetchone()["c"])
+
+    def _backfill_fts(self) -> None:
+        """Index rows that predate the full-text table. Lock held.
+
+        The triggers only fire on writes, so a store that existed before the
+        index was added has rows the index has never seen — they are stored,
+        listed and counted, but never found by searching, which looks exactly
+        like memory not working.
+        """
+        if not self.fts:
+            return
+        try:
+            rows = self.db.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
+            if not rows:
+                return
+            hit = self.db.execute(
+                "SELECT COUNT(*) c FROM mem_fts WHERE mem_fts MATCH ?",
+                (_fts_probe(self.db),)).fetchone()["c"]
+            if hit:
+                return
+            # An external-content table cannot be filled by inserting rows: its
+            # content lives in `memories`, and the index is rebuilt from there.
+            self.db.execute("INSERT INTO mem_fts(mem_fts) VALUES('rebuild')")
+        except sqlite3.Error:
+            self.fts = False
+
+    def _add_tier_column(self) -> None:
+        """Called with the lock held, before the indexes."""
+        columns = {r["name"] for r in
+                   self.db.execute("PRAGMA table_info(memories)").fetchall()}
+        if "tier" not in columns:
+            self.db.execute("ALTER TABLE memories ADD COLUMN tier TEXT "
+                            "NOT NULL DEFAULT 'project'")
+            self._needs_filing = True
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_tier ON memories(tier)")
+
+    def _file_untiered(self) -> None:
+        """Sort a pre-tier store into tiers. Called with the lock held.
+
+        Everything already there was learnt before the distinction existed, so
+        it is filed by the same guess a new memory gets rather than dumped into
+        one tier and left wrong.
+        """
+        if not getattr(self, "_needs_filing", False):
+            return
+        self._needs_filing = False
+        for row in self.db.execute("SELECT id, text FROM memories").fetchall():
+            guess = classify(row["text"])
+            if guess != PROJECT:
+                self.db.execute(
+                    "UPDATE memories SET tier=?, scope='' WHERE id=?",
+                    (guess, row["id"]))
+        self.db.commit()
+
+    def _tier_clause(self, scope: str) -> tuple[str, list]:
+        """Project memories from this folder; global and personal from anywhere.
+
+        That is the whole point of the tiers: what Kestrel knows about the
+        machine, and what it knows about you, should not have to be relearnt in
+        every new folder.
+        """
+        return ("(tier IN (?, ?) OR (tier = ? AND scope = ?))",
+                [GLOBAL, PERSONAL, PROJECT, scope])
 
     def search(self, query: str, limit: int = 8, scope: str | None = None,
                include_pinned: bool = True) -> list[Memory]:

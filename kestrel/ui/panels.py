@@ -10,7 +10,7 @@ import re
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                               QComboBox, QFrame, QPlainTextEdit,
+                               QComboBox, QFrame, QPlainTextEdit, QTabBar,
                                QSizePolicy,
                                QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit,
@@ -19,11 +19,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import models as modelsmod
-from ..gguf import estimate_vram_mb
+from ..gguf import estimate_vram_mb, kv_bytes as gguf_kv_bytes
 from .. import attach as attachmod
 from .. import canvas as canvasmod
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
                 speech as speechmod, sysmon)
+from .. import memory as memorymod
 from ..memory import KINDS, MemoryStore
 from ..todo import BLOCKED, DISPLAY_MARKS, DOING, DONE, MARKS, TODO
 from ..runtime import CACHE_TYPES, REASONING_FORMATS, ROPE_SCALING, SPLIT_MODES
@@ -296,7 +297,9 @@ class ModelsPanel(UiThread, QWidget):
         lines = [e.info.summary(), "", f"path           {e.path}"]
         if e.repo:
             lines.append(f"repo           {e.repo}")
-        lines.append(f"needs ~{need:,} MB at {ctx:,} ctx")
+        kv = gguf_kv_bytes(e.info, ctx) / 1024 ** 3
+        lines.append(f"needs ~{need / 1024:.1f} GB at {ctx:,} ctx "
+                     f"({e.info.size_gb:.1f} GB weights + {kv:.1f} GB KV cache)")
         try:
             from ..runtime import resolve_gpu_layers
             if self.cfg.runtime.n_gpu_layers < 0 and e.info.n_layer:
@@ -416,6 +419,21 @@ class ParamsPanel(QWidget):
         self.budget_note.setObjectName("Dim")
         self.budget_note.setWordWrap(True)
         form.addRow("", self.budget_note)
+
+        self.rt_nkvo = QCheckBox("Keep the KV cache in system RAM")
+        self.rt_nkvo.setToolTip("Frees graphics memory for the weights. The "
+                                "cache is read every token, so this costs some "
+                                "speed — but a model that fits is faster than "
+                                "one that does not run.")
+        self.rt_nkvo.setChecked(rt.no_kv_offload)
+        form.addRow("", self.rt_nkvo)
+
+        self.rt_cpumoe = QCheckBox("Keep mixture-of-experts weights on the CPU")
+        self.rt_cpumoe.setToolTip("Only useful for MoE models. A fraction of "
+                                  "the experts run per token, so the idle ones "
+                                  "are the cheapest thing to move off the GPU.")
+        self.rt_cpumoe.setChecked(rt.cpu_moe)
+        form.addRow("", self.rt_cpumoe)
 
         self.split = GpuSplit()
         self.split.changed.connect(lambda v: self.rt_ngl.setValue(v))
@@ -582,6 +600,8 @@ class ParamsPanel(QWidget):
         rt.main_gpu = self.rt_mg.value()
         rt.tensor_split = self.rt_ts.text().strip()
         rt.gpu_budget_mb = self.rt_budget.value()
+        rt.no_kv_offload = self.rt_nkvo.isChecked()
+        rt.cpu_moe = self.rt_cpumoe.isChecked()
         rt.rope_scaling = self.rt_rope.currentText()
         rt.rope_freq_base = self.rt_rope_base.value()
         rt.rope_freq_scale = self.rt_rope_scale.value()
@@ -756,6 +776,25 @@ class MemoryPanel(QWidget):
         blurb.setObjectName("Dim")
         lay.addWidget(blurb)
 
+        # Three kinds of memory, kept apart because they have different lives:
+        # a project fact dies with the project, what Kestrel knows about the
+        # machine does not, and what it knows about you belongs to you.
+        self.tier_tabs = QTabBar()
+        self.tier_tabs.setExpanding(False)
+        for label, key in (("Project", memorymod.PROJECT),
+                           ("Global", memorymod.GLOBAL),
+                           ("Personal", memorymod.PERSONAL)):
+            index = self.tier_tabs.addTab(label)
+            self.tier_tabs.setTabData(index, key)
+            self.tier_tabs.setTabToolTip(index, memorymod.TIER_HELP[key])
+        self.tier_tabs.currentChanged.connect(lambda _i: self.refresh())
+        lay.addWidget(self.tier_tabs)
+
+        self.tier_note = QLabel("")
+        self.tier_note.setObjectName("Dim")
+        self.tier_note.setWordWrap(True)
+        lay.addWidget(self.tier_note)
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search memories…")
         self.search.textChanged.connect(self.refresh)
@@ -831,14 +870,21 @@ class MemoryPanel(QWidget):
                 self.statusLine.emit(f"Could not open memory store: {e}")
         self.refresh()
 
+    def current_tier(self) -> str:
+        return self.tier_tabs.tabData(self.tier_tabs.currentIndex()) or ""
+
     def refresh(self) -> None:
         self.tree.clear()
         if self.store is None:
             self.count_label.setText("Memory is switched off.")
             return
+        tier = self.current_tier()
+        self.tier_note.setText(memorymod.TIER_HELP.get(tier, ""))
         query = self.search.text().strip()
         items = (self.store.search(query, limit=200, include_pinned=False)
-                 if query else self.store.all())
+                 if query else self.store.all(tier=tier, limit=400))
+        if query and tier:
+            items = [m for m in items if m.tier == tier]
         for m in items:
             it = QTreeWidgetItem(["*" if m.pinned else "", m.kind, m.text])
             it.setData(0, Qt.UserRole, m.id)
@@ -866,7 +912,10 @@ class MemoryPanel(QWidget):
         kind, ok = QInputDialog.getItem(self, "Kind", "Type of memory:", KINDS, 0, False)
         if not ok:
             return
-        self.store.remember(text.strip(), kind, importance=4, source="user")
+        # Added while looking at a tier, so that is where it goes: the tab is
+        # the answer to "which kind of memory is this".
+        self.store.remember(text.strip(), kind, importance=4, source="user",
+                            tier=self.current_tier(), enforce=False)
         self.refresh()
 
     def edit(self) -> None:
@@ -981,6 +1030,8 @@ class PlanPanel(QWidget):
         self.tree.setWordWrap(True)
         self.tree.setUniformRowHeights(False)
         self.tree.setItemDelegateForColumn(1, WrappingDelegate(self.tree))
+        self.tree.header().sectionResized.connect(
+            lambda *_: self.tree.scheduleDelayedItemsLayout())
         # Steps are edited where they are read: double-click the text, or press
         # F2. A plan is a working document, and retyping it through a dialog to
         # fix a word is friction the model does not have.
@@ -1185,6 +1236,8 @@ class PlanPanel(QWidget):
         if item_id is None:
             return
         text = item.text(1).split("  —")[0].strip()
+        # The row shows "2a  Write the loop"; only the words are the step.
+        text = re.sub(r"^\d+[a-z]?(?:\.\d+)?\s+", "", text).strip()
         if not text:
             self.update_todo(self.todo)      # refuse to blank a step
             return
@@ -1227,16 +1280,20 @@ class PlanPanel(QWidget):
             self.head.setText(f"{done}/{total} done"
                               + (f" — {todo.title}" if todo.title else ""))
         current = todo.current
-        for item in todo.items:
+        for label, item, depth in todo.outline():
+            indent = "      " * depth
             row = QTreeWidgetItem([DISPLAY_MARKS.get(item.status, "○"),
-                                   item.text + (f"  — {item.note}" if item.note else "")])
+                                   f"{indent}{label}  {item.text}"
+                                   + (f"  — {item.note}" if item.note else "")])
             row.setData(0, Qt.UserRole, item.id)
+            if depth:
+                row.setForeground(1, QColor(theme.TEXT_DIM))
             # The mark belongs beside the first line of a wrapped step, not
             # floating in the middle of the space the text needs.
             row.setTextAlignment(0, Qt.AlignTop | Qt.AlignHCenter)
             row.setTextAlignment(1, Qt.AlignTop | Qt.AlignLeft)
             row.setFlags(row.flags() | Qt.ItemIsEditable)
-            row.setToolTip(1, f"step {item.id} · {item.status} — double-click to edit")
+            row.setToolTip(1, f"step {label} · {item.status} — double-click to edit")
             colour = {DONE: theme.SIGNAL, DOING: theme.AMBER,
                       BLOCKED: theme.ALERT}.get(item.status, theme.TEXT_DIM)
             row.setForeground(0, QColor(colour))
@@ -1245,6 +1302,10 @@ class PlanPanel(QWidget):
         # Rebuilding the tree fires itemChanged for every row; the guard stops
         # those being mistaken for the user typing.
         self._loading = False
+        # Row heights are measured against the column width, which is not known
+        # until the tree has been laid out — so ask for the measurement again
+        # once it has been.
+        self.tree.scheduleDelayedItemsLayout()
 
 
 # ========================================================== persona panel ===

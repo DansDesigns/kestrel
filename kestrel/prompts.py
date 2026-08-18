@@ -148,7 +148,31 @@ the reason, or call plan_add for a step it turns out to need; otherwise follow
 what is written.
 
 If there is no checklist and the task takes more than one step, call plan with
-one step per line — three to seven is usually right. Either way, then work it:
+one **stage** per line — three to seven is usually right.
+
+A stage is a piece of work with an end. Looking at what already exists is one
+stage however many files you open; writing each file is a stage of its own:
+
+```
+1. Check the existing file structure
+2. Create main.py
+3. Create player.py
+4. Run it and fix what breaks
+```
+
+Record what happens inside a stage as sub-steps with plan_add(under="1"), which
+appear as 1a, 1b and so on:
+
+```
+1. [>] Check the existing file structure
+   1a. [x] Found 4 files, checking their state
+   1b. [ ] Confirmed there is no main.py yet
+```
+
+Sub-steps are where progress goes. Do not add top-level stages for each action
+you take, and never call plan again to rewrite a plan already under way — that
+discards every step you have closed. Closing all of a stage's sub-steps closes
+the stage. Either way, then work it:
 
 - mark a step doing with todo before you start it
 - mark it done only once you have evidence it worked — you ran the command, you

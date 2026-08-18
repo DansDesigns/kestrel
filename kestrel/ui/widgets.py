@@ -254,6 +254,7 @@ class ChatView(QTextBrowser):
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
         self._pending_toggle = False
+        self._live = False
         # Links are the only clickable element a text document offers; buttons
         # cannot be embedded in the flow.
         self.setOpenLinks(False)
@@ -271,6 +272,7 @@ class ChatView(QTextBrowser):
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
         self._pending_toggle = False
+        self._live = False
         # Links are the only clickable element QTextEdit offers; buttons cannot
         # be embedded in the document flow.
         self.setOpenLinks(False)          # QTextBrowser: handle them ourselves
@@ -467,6 +469,7 @@ class ChatView(QTextBrowser):
         )
 
     def stream_thought(self, chunk: str) -> None:
+        self._live = True
         """Reasoning streams into a dim band that collapses to a summary line the
         moment the model starts producing its actual answer."""
         if self._thought_anchor is None:
@@ -516,6 +519,7 @@ class ChatView(QTextBrowser):
         self.setTextCursor(c)
         self._thought_anchor = None
         self._thought_buf = ""
+        self._live = False
         self._record("_thought_line", head, tokens, approx, full)
         self._thought_line(head, tokens, approx, full)
 
@@ -534,11 +538,26 @@ class ChatView(QTextBrowser):
             return
         self.rerender()
 
-    def apply_pending_toggle(self) -> None:
-        """Called when a turn ends, in case a toggle was waiting for it."""
+    def finish_turn(self) -> None:
+        """Close out any open region, then apply a toggle that was waiting.
+
+        A trace left open — the turn was cancelled, the reply never arrived —
+        keeps `_thought_anchor` set, and every redraw after that is refused
+        because the view believes it is still streaming. That is what made the
+        expand link stop working entirely rather than merely being deferred.
+        """
+        self._anchor = None
+        self._thought_anchor = None
+        self._open_pending = False
+        self._thought_buf = ""
+        self._live = False
         if getattr(self, "_pending_toggle", False):
             self._pending_toggle = False
             self.rerender()
+
+    # kept for callers that used the old name
+    def apply_pending_toggle(self) -> None:
+        self.finish_turn()
 
     def _thought_line(self, head: str, tokens: int, approx: str = "",
                       full: str = "") -> None:   # noqa: D401
@@ -599,6 +618,7 @@ class ChatView(QTextBrowser):
         self._open_pending = False
 
     def stream(self, chunk: str) -> None:
+        self._live = True
         if self._thought_anchor is not None:
             self._collapse_thought()
         self._open()
@@ -608,7 +628,15 @@ class ChatView(QTextBrowser):
         self._keep_in_view()
 
     def streaming(self) -> bool:
-        return self._anchor is not None
+        """Is there text on screen that a redraw would destroy?
+
+        Not the same as "has begin_assistant been called". Tokens can arrive
+        before a reply is formally opened, and a live reasoning trace is not in
+        the record either. Anything written but not yet recorded counts, or a
+        rebuild silently deletes it mid-generation.
+        """
+        return (self._anchor is not None or self._thought_anchor is not None
+                or self._live)
 
     def streamed_text(self) -> str:
         if self._anchor is None:
@@ -626,6 +654,7 @@ class ChatView(QTextBrowser):
         return self._reply_text.get(index, "")
 
     def _assistant_block(self, final: str) -> None:
+        self._live = False
         self._reply_no += 1
         self._reply_text[self._reply_no] = final
         self._append(self.bubble("Kestrel",
@@ -697,6 +726,7 @@ class ChatView(QTextBrowser):
         c.insertHtml(self.bubble("Kestrel",
                                  md_to_html(final) + self._actions_html(self._reply_no),
                                  theme.AMBER, theme.BUBBLE_AI))
+        self._live = False
         self._end()
         self._keep_in_view()
         self._anchor = None
@@ -1473,15 +1503,25 @@ class WrappingDelegate(QStyledItemDelegate):
     the column's real width and asks for the height it needs.
     """
 
+    MAX_LINES = 4
+
     def sizeHint(self, option, index):  # noqa: N802
-        text = index.data() or ""
-        width = max(60, option.rect.width() or
-                    self.parent().columnWidth(index.column()) if self.parent() else 200)
-        metrics = QFontMetrics(option.font)
-        rect = metrics.boundingRect(0, 0, width - 8, 10_000,
-                                    Qt.TextWordWrap | Qt.AlignLeft, str(text))
+        text = str(index.data() or "")
         base = super().sizeHint(option, index)
-        return QSize(base.width(), max(base.height(), rect.height() + 8))
+        view = self.parent()
+        # The column's own width, not the option rectangle: during layout that
+        # rectangle can be almost anything, and measuring against a narrow one
+        # wraps a short step into half a dozen lines of empty row.
+        width = view.columnWidth(index.column()) if view else 0
+        if width <= 20:
+            return base
+        metrics = QFontMetrics(option.font)
+        rect = metrics.boundingRect(0, 0, width - 12, 10_000,
+                                    Qt.TextWordWrap | Qt.AlignLeft, text)
+        lines = max(1, min(self.MAX_LINES,
+                           round(rect.height() / max(1, metrics.lineSpacing()))))
+        return QSize(base.width(), max(base.height(),
+                                       lines * metrics.lineSpacing() + 6))
 
     def paint(self, painter, option, index):  # noqa: N802
         text = str(index.data() or "")

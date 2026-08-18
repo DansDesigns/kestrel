@@ -289,6 +289,57 @@ which also protects a palette change made mid-reply.
 transcript when something has gone wrong and the least interesting when it has
 not, so it shows its opening with the whole of it one click away.
 
+**Sub-steps write themselves.** The two-level plan is only useful if something
+fills the second level, and a small model will not reliably do that while also
+doing the work. Kestrel knows exactly what happened, so it records it: every
+tool that runs is logged as a sub-step of the stage in flight.
+
+```
+1. [x] Check the existing files
+   1a. [x] list_dir .
+   1b. [x] read_file readme.txt
+2. [x] Create main.py
+   2a. [x] write_file main.py
+```
+
+These are a record of what happened, not a list of what must happen, so they do
+not decide when a stage is finished — otherwise a stage would close the moment
+its first tool ran. Progress counts planned work only.
+
+**Stages and sub-steps.** A plan has two levels. A stage is a piece of work with
+an end — looking at what already exists is one stage however many files are
+opened; writing each file is a stage of its own. What happens inside a stage is
+recorded as sub-steps, labelled 1a, 1b and so on:
+
+```
+1. [x] Check the existing file structure
+   1a. [x] Found 4 files, checking their state
+   1b. [x] Confirmed there is no main.py yet
+2. [>] Create main.py
+   2a. [>] Write the game loop
+3. [ ] Create player.py
+```
+
+This gives a small model somewhere to record progress without inventing a
+top-level step for every action, and closing all of a stage's sub-steps closes
+the stage. Progress counts the work, not the headings.
+
+**A plan is never destroyed by a call that produces nothing.** Auto-planning
+streams the checklist in line by line, then parses the finished reply to confirm
+it — and a reasoning model can put the entire plan in its trace and return an
+empty answer, so that confirming parse finds nothing. The plan built while
+streaming is the better record and is never discarded in favour of a worse one.
+`set_plan` likewise ignores an empty or garbled set of steps rather than
+emptying the list first and asking questions afterwards. Between them these were
+what made a plan appear, vanish, and leave the model with nothing to work
+through.
+
+**A plan under way is not replaced.** Calling `plan` again with steps already
+closed is refused, with the current plan returned and a pointer to `plan_add`
+and `todo` instead — models rewrite the checklist while reasoning, and every
+closed step goes with it. `replace=true` is there for when the task genuinely
+changed.
+
 **Setting a step by hand.** *Working*, *Done* and *To do* move the selected step
 between states. The model sets these as it goes; setting them yourself matters
 when it gets one wrong, or when the work happened outside Kestrel. Each change
@@ -324,6 +375,24 @@ a span of them:
 | `canvas_append` | Add to the end |
 | `canvas_edit` | Replace lines *start..end* |
 | `canvas_save` | Write it to a file in the workspace |
+
+**Code in a reply is moved to the canvas.** Telling a model where to put code
+only works when it listens, and some do not — leaving a wall of source in the
+chat that cannot be edited, run or saved while the canvas beside it sits empty.
+So the harness moves it: fenced blocks are lifted out of the finished reply into
+the canvas, and the reply keeps its explanation with a line saying where the code
+went.
+
+Judgement is applied rather than a blanket rule. A two-line snippet quoted
+mid-sentence is part of the explanation and stays; so does anything in a `text`
+or `output` fence, which is usually a paste of what a command printed. Several
+blocks in one reply are kept in order with a rule between them. Nothing is moved
+if the model already wrote it to the canvas itself.
+
+A model that decides the canvas must be an XML tag — writing the file inside
+`<canvas>…</canvas>` and then calling `canvas_save` on an empty buffer — has its
+intent taken at face value: the block is read as the write it was meant to be,
+including when the reply was cut off before the closing tag.
 
 The prompt gives the model the whole sequence — read, write or edit, save — and
 tells it plainly never to paste a file into a reply or build one up with
@@ -442,6 +511,31 @@ function.
 
 ### 6.5 Scope and inspection
 
+Starting a new session clears the **project** tier and leaves the other two
+alone: neither the machine's setup nor what you have said about yourself stopped
+being true because a conversation ended.
+
+**Three kinds of memory**, kept apart because they have different lives:
+
+| Tier | Holds | Lives |
+|---|---|---|
+| **Project** | This codebase — its layout, its decisions, what has been tried | With the folder |
+| **Global** | Where tools live, how projects are laid out, what Kestrel can do | Everywhere |
+| **Personal** | The person — their name, how they like to work | Everywhere |
+
+A project fact dies with the project; what Kestrel knows about the machine does
+not, and what it knows about you belongs to you rather than to a folder. Global
+and personal memories are therefore stored without a scope — tying them to the
+folder they happened to be learnt in is exactly what made them invisible
+everywhere else.
+
+The model picks a tier when it remembers something, and one is guessed when it
+does not: automatic capture cannot ask, and filing everything under the project
+is how "the user is called Dan" ends up unknown in the next folder. A wrong
+guess is correctable in the Memory tab, which has a sub-tab per tier; a store
+that predates the distinction is filed by the same guess on first open rather
+than dumped into one tier and left wrong.
+
 Recall demands more than a shared word. A single matching term only counts when
 it is distinctive rather than one appearing in half the store — otherwise a note
 about the clock surfaces on every prompt that happens to mention time. What
@@ -536,6 +630,16 @@ Controls cover mode (`auto`, `on`, `off`), a token budget, the server's
 ---
 
 ## 8a. Projects and conversations
+
+**Switching project moves everything with it.** Clearing the transcript is not
+enough: the checklist, the thinking log, the memory scope and the file sandbox
+are each tied to a folder, and leaving any of them attached to the previous one
+is how a new project arrives already carrying another project's plan, reasoning
+and recollections. All five are rebound together.
+
+Thought recall is narrower still — per task, not per project. Reasoning about
+last week's installer is not context for today's question, so `THOUGHTS.md` is
+written under task headings and only the current task's lines are recalled.
 
 A **project** is a folder named `YYYY-MM-DD name` inside the workspace root, so
 projects sort chronologically wherever they are listed — in Kestrel, in Explorer,
@@ -705,6 +809,72 @@ Under **Params → Runtime**. The complete llama.cpp load-time surface is expose
 
 A live command preview shows the exact command line that will be executed.
 Nothing is concealed behind the interface.
+
+### 10.2a Models that can see
+
+A vision model is usually published as two files: the language weights and an
+`mmproj` projector holding the image encoder. Loading only the first gives a
+model that quietly cannot see, which is indistinguishable from a text model —
+which is why one could be reported as text-only.
+
+Kestrel looks for a projector beside the model and passes it as `--mmproj`. The
+pairing requires a real name match rather than any `mmproj` in the folder, since
+handing llama.cpp an encoder belonging to different weights is worse than
+finding none. The Models tab says whether a model reads images and which
+projector it found; a known vision family with no projector beside it is
+reported as needing one rather than being silently downgraded.
+
+With a projector loaded, attached images are sent as images. Without one they
+are described — dropping them silently is how a model ends up answering about a
+picture it was never shown.
+
+### 10.2b Why two models of the same size behave differently
+
+The weights are only part of what a model needs. The KV cache scales with
+layers, key/value heads and context length, and varies enormously between
+models of similar file size:
+
+| Model | Weights | KV at 10k ctx | Total |
+|---|---|---|---|
+| Qwen3 30B-A3B (48 layers, 4 KV heads) | 17.2 GB | 0.47 GB | 18.0 GB |
+| A 27B MoE (62 layers, 8 KV heads) | 16.2 GB | 2.42 GB | 18.9 GB |
+
+The smaller file needs more memory. That is why one loads and the other does
+not, and why the answer is context length rather than a smaller download.
+
+**The cache does not have to live on the GPU.** `--no-kv-offload` keeps it in
+system RAM while every layer of weights stays on the device, which is usually
+the right trade: the weights are read constantly and benefit most from being
+there, and system RAM is the larger pool. For a mixture-of-experts model
+`--cpu-moe` goes further — only a fraction of the experts run per token, so the
+idle ones are the cheapest thing to leave behind. Both are switches in
+Params → Runtime.
+
+**The recovery ladder** applies these in order of what they cost, retrying after
+each failure:
+
+1. keep the KV cache in system RAM
+2. keep the mixture-of-experts weights on the CPU
+3. use an 8-bit KV cache, halving it
+4. halve the GPU offload — repeatedly
+5. run entirely on the CPU
+6. halve the context
+
+Context is last because it is the only one that changes what the model can
+actually do; everything above it costs speed and nothing else. When the ladder
+runs out, Kestrel says what it tried and that a smaller quantisation is the next
+step, rather than reporting a bare failure.
+
+Kestrel checks before loading and, when a model will not fit, says what it needs
+and offers the largest context that would. If a load still fails once nothing is
+on the GPU, it halves the context and tries again rather than stopping. The
+Models tab shows the split — weights and cache separately — so the cause is
+visible before anything is attempted.
+
+Estimates account for grouped-query attention: a model with 40 query heads and 8
+key/value heads needs a fifth of the cache its embedding width alone suggests.
+Ignoring that overstates the requirement several times over on exactly the
+models people are running now.
 
 ### 10.3a Splitting a model between GPU and system RAM
 

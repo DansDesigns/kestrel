@@ -14,11 +14,12 @@ def register(reg, store_provider, scope_provider) -> None:
             raise RuntimeError("Long-term memory is switched off in Settings.")
         return s
 
-    def remember(text: str, kind: str = "fact", importance: int = 3) -> ToolResult:
+    def remember(text: str, kind: str = "fact", importance: int = 3,
+                 tier: str = "") -> ToolResult:
         store = _store()
         try:
             mid, created = store.remember(text, kind, importance, source="agent",
-                                          scope=scope_provider())
+                                          scope=scope_provider(), tier=tier)
         except ValueError as e:
             # Told, rather than silently dropped, so the model stops trying.
             return ToolResult(f"Not stored: {e}. Memory is for things still true "
@@ -46,10 +47,16 @@ def register(reg, store_provider, scope_provider) -> None:
         "remember", "Save something worth knowing in future sessions.",
         [Param("text", "string", "One durable fact, still true in a month.", required=True),
          Param("kind", "string", f"One of: {', '.join(KINDS)}.", default="fact"),
-         Param("importance", "integer", "1 trivial to 5 essential.", default=3)],
+         Param("importance", "integer", "1 trivial to 5 essential.", default=3),
+         Param("tier", "string",
+               "project (this folder), global (true wherever Kestrel runs) or "
+               "personal (about the user). Guessed if omitted.")],
         remember, DANGER_WRITE,
         detail="For durable things only — preferences, setup, decisions, "
-               "procedures that worked. Not file contents or this turn's output."))
+               "procedures that worked. Not file contents or this turn's output. "
+               "Use project for facts about this codebase, global for how the "
+               "machine and its tools are set up, personal for what the user "
+               "tells you about themselves."))
     reg.add(Tool(
         "recall", "Search what you remember from earlier sessions.",
         [Param("query", "string", "What you want to know.", required=True),

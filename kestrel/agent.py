@@ -26,8 +26,8 @@ from .llm import ChatResult, LlamaClient, LLMError
 from .memory import CAPTURE_PROMPT, MemoryStore, parse_capture
 from .tokens import TokenCounter
 from .thoughts import ThoughtLog
-from .todo import TodoList
-from .tools import Registry, ToolResult
+from .todo import DONE, TodoList
+from .tools import Registry, ToolResult, build_registry
 
 def _memory_path(cfg) -> str:
     """Resolve the store location, falling back to the config directory when a
@@ -103,6 +103,41 @@ def find_tool_blobs(text: str) -> list[tuple[int, int, str]]:
     return found
 
 
+CANVAS_TAG_RE = re.compile(
+    r"<canvas(?:\s+[^>]*)?>\s*(.*?)\s*</canvas>", re.DOTALL | re.IGNORECASE)
+CANVAS_OPEN_RE = re.compile(r"<canvas(?:\s+[^>]*)?>\s*(.*)$", re.DOTALL | re.IGNORECASE)
+
+
+def parse_canvas_tags(text: str) -> list[Call]:
+    """Accept <canvas>…</canvas> as a canvas_write.
+
+    Some models decide the canvas must be an XML tag rather than a tool, write
+    the file inside one, and then call canvas_save on an empty buffer. The
+    intent is unmistakable and the content is right there, so it is taken as
+    the write it was meant to be rather than left on the floor.
+    """
+    out = []
+    for match in CANVAS_TAG_RE.finditer(text):
+        body = _strip_fence(match.group(1))
+        if body.strip():
+            out.append(Call("canvas_write", {"text": body}, raw=match.group(0)))
+    if not out:
+        # An unclosed tag, which is the usual shape when the reply was cut off.
+        opened = CANVAS_OPEN_RE.search(text)
+        if opened and len(opened.group(1).strip()) > 40:
+            out.append(Call("canvas_write", {"text": _strip_fence(opened.group(1))},
+                            raw=opened.group(0)))
+    return out
+
+
+def _strip_fence(body: str) -> str:
+    body = body.strip()
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z0-9_+-]*\s*\n?", "", body)
+        body = re.sub(r"\n?```\s*$", "", body)
+    return body
+
+
 def parse_text_calls(text: str) -> list[Call]:
     """Pull tool calls out of free text. Deliberately forgiving — small models
     put the JSON in fences, forget the closing tag, or add a stray comma."""
@@ -121,6 +156,9 @@ def parse_text_calls(text: str) -> list[Call]:
                 out.append(Call(str(obj["name"]), args, raw=blob))
     if out:
         return out
+    tagged = parse_canvas_tags(text)
+    if tagged:
+        return tagged
     for rx in (TOOL_RE, FENCE_RE):
         for m in rx.finditer(text):
             blob = m.group(1)
@@ -168,6 +206,59 @@ PLAN_NOISE = re.compile(
     r"the plan|this plan|plan|steps?|breakdown|hope this|anything else)\b",
     re.I)
 PLAN_BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|step\s*\d+[:.)]?)\s*", re.I)
+
+
+FENCE_BLOCK_RE = re.compile(
+    r"```([A-Za-z0-9_+\-]*)[ \t]*\n(.*?)(?:```|\Z)", re.DOTALL)
+LIFT_MIN_LINES = 4
+LIFT_MIN_CHARS = 160
+# Prose formats that are not code and belong where they were written.
+PROSE_FENCES = {"", "text", "txt", "md", "markdown", "log", "output", "console"}
+
+
+def lift_code(answer: str, buffer) -> tuple[str, int]:
+    """Move code out of a reply and into the canvas. Returns (reply, blocks).
+
+    Telling a model where to put code only works when it listens. Some do not,
+    and the result is a wall of source in the chat that cannot be edited, run
+    or saved — while the canvas beside it sits empty. So the harness moves it:
+    the reply keeps its explanation, the code goes where it can be worked on.
+
+    Prose fences are left alone, and so is anything short — a two-line snippet
+    quoted mid-sentence is part of the explanation, not a file.
+    """
+    blocks: list[tuple[str, str]] = []
+
+    def take(match) -> str:
+        language, body = match.group(1).strip().lower(), match.group(2)
+        stripped = body.strip("\n")
+        if language in PROSE_FENCES and stripped.count("\n") + 1 < 12:
+            return match.group(0)
+        if (stripped.count("\n") + 1 < LIFT_MIN_LINES
+                and len(stripped) < LIFT_MIN_CHARS):
+            return match.group(0)
+        blocks.append((language, stripped))
+        lines = stripped.count("\n") + 1
+        return f"[{lines} lines of {language or 'code'} written to the canvas]"
+
+    rewritten = FENCE_BLOCK_RE.sub(take, answer)
+    if not blocks:
+        return answer, 0
+    if len(blocks) == 1:
+        language, body = blocks[0]
+    else:
+        # Several blocks in one reply are usually one file in pieces, or a set
+        # of small files; they are kept in order with a rule between them.
+        language = blocks[0][0]
+        body = "\n\n".join(
+            f"# ---- part {n} ----\n{code}" if language in ("python", "py", "sh")
+            else f"/* ---- part {n} ---- */\n{code}"
+            for n, (_lang, code) in enumerate(blocks, 1))
+    existing = buffer.text.strip()
+    if existing and body.strip() in existing:
+        return rewritten, 0          # the model already put it there
+    buffer.set(body, language=language or buffer.language)
+    return rewritten, len(blocks)
 
 
 def clean_plan_lines(text: str) -> list[str]:
@@ -249,6 +340,9 @@ def strip_calls(text: str) -> str:
     # A block truncated by the token limit leaves an opening tag behind.
     text = re.sub(r"<tool>\s*\{.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"</?tool>", "", text, flags=re.IGNORECASE)
+    text = CANVAS_TAG_RE.sub("", text)
+    text = CANVAS_OPEN_RE.sub("", text)
+    text = re.sub(r"</?canvas[^>]*>", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -465,9 +559,45 @@ class Agent:
 
     def reset(self) -> None:
         self.history.clear()
+        self.thoughts.start_task("")      # a new conversation recalls nothing yet
         if self.ctx:
             self.ctx.digest = ""
             self.ctx.compactions = 0
+
+    def forget_project_memories(self) -> int:
+        """Drop what was learnt about this project, keeping the rest.
+
+        Starting again means starting again: the project tier goes, while what
+        Kestrel knows about the machine and about the person stays, because
+        neither of those became untrue.
+        """
+        if self.memory is None:
+            return 0
+        from .memory import PROJECT
+        return self.memory.clear_tier(PROJECT)
+
+    def rebind(self, workspace: str) -> None:
+        """Point the agent at a different project.
+
+        Clearing the transcript is not enough. The checklist, the thinking log
+        and the memory scope are all tied to a folder, and leaving them attached
+        to the previous one is how a new project arrives already carrying
+        another project's plan, reasoning and recollections.
+        """
+        self.cfg.workspace = workspace
+        self.reset()
+        self.todo = TodoList.load(workspace) if self.cfg.todo_enabled else None
+        self.thoughts = ThoughtLog.load(workspace)
+        if self.memory is not None:
+            self.memory.scope = self.cfg.memory_scope()
+        # The registry closes over the workspace for its file sandbox, so it is
+        # rebuilt rather than left pointing at the previous project's folder.
+        self.registry = build_registry(self.cfg, lambda: self.skills,
+                                       approver=self._approve,
+                                       memory_provider=lambda: self.memory,
+                                       todo_provider=lambda: self.todo,
+                                       persona_provider=lambda: self.persona)
+        self._system_cache = ""
 
     def cancel(self) -> None:
         self.cancelled.set()
@@ -583,6 +713,7 @@ class Agent:
                 answer = collapse_repeats(strip_calls(content).strip())
                 if not answer:
                     answer = "(the model returned nothing usable)"
+                answer = self._lift_code(answer)
                 self.history.append({"role": "assistant", "content": answer})
                 self._turn_log.append(f"assistant: {answer}")
                 self.emit("assistant", {"text": answer})
@@ -610,6 +741,7 @@ class Agent:
                 if call.name == "finish":
                     final = collapse_repeats(
                         str(call.args.get("answer") or "").strip()) or "Done."
+                    final = self._lift_code(final)
                     self.history.append({"role": "assistant", "content": final})
                     self._turn_log.append(f"assistant: {final}")
                     self.emit("assistant", {"text": final})
@@ -652,6 +784,7 @@ class Agent:
                 self._turn_log.append(f"[used {call.name}]")
                 self.emit("tool_result", {"name": call.name, "ok": result.ok,
                                           "text": result.display, "shown": shown})
+                self._record_substep(call, result)
                 self._record_tool(call, shown)
 
         msg = (f"Stopped after {self.cfg.max_steps} steps without finishing. "
@@ -732,6 +865,57 @@ class Agent:
     def _thought_block(self) -> str:
         return self.thoughts.block()
 
+    # Tools whose whole job is bookkeeping: recording them as work would fill
+    # the plan with entries about the plan.
+    QUIET_TOOLS = {"plan", "todo", "plan_add", "finish", "skill_find",
+                   "canvas_read", "recall"}
+    MAX_SUBSTEPS = 8
+
+    def _record_substep(self, call, result) -> None:
+        """Log what a tool did as a sub-step of the stage in flight.
+
+        The two-level plan is only useful if something fills the second level,
+        and a small model will not reliably do it while also doing the work.
+        The harness knows exactly what happened, so it records it: the stage
+        stays the model's, the detail underneath is written from fact.
+        """
+        if self.todo is None or not self.todo.items:
+            return
+        if call.name in self.QUIET_TOOLS or not result.ok:
+            return
+        stage = self.todo.current
+        if stage is None:
+            return
+        stage = self.todo.stage_of(stage) or stage
+        if len(self.todo.children(stage.id)) >= self.MAX_SUBSTEPS:
+            return
+        detail = ""
+        for key in ("path", "file", "query", "pattern", "command", "name"):
+            value = call.args.get(key)
+            if value:
+                detail = f" {str(value)[:48]}"
+                break
+        text = f"{call.name}{detail}"
+        if any(k.text == text for k in self.todo.children(stage.id)):
+            return
+        item = self.todo.add(text, parent=stage.id, auto=True)
+        item.status = DONE          # a record of what ran, already finished
+        self.todo.save()
+        self.emit("todo", {"todo": self.todo})
+
+    def _lift_code(self, answer: str) -> str:
+        """Put any code in the reply into the canvas instead."""
+        if not self.registry or "canvas_write" not in self.registry.tools:
+            return answer
+        from .canvas import BUFFER
+        try:
+            rewritten, moved = lift_code(answer, BUFFER)
+        except Exception:
+            return answer
+        if moved:
+            self.emit("canvas", {"blocks": moved})
+        return rewritten
+
     def _plan_briefing(self) -> str:
         """Aim the model at a checklist it did not write.
 
@@ -791,13 +975,27 @@ class Agent:
                 extra=self.cfg.thinking.payload(), on_token=on_token,
                 cancel=self.cancelled.is_set)
         except Exception:
-            self.todo.clear()
+            # Whatever was drafted while streaming stands. Clearing here threw
+            # away a usable plan because the request was interrupted.
+            if len(drafted) < 2:
+                self.todo.clear()
+                self.emit("todo", {"todo": self.todo})
             return
+
         visible = collapse_repeats(reasoning.split(res.content)[0])
         steps = clean_plan_lines(visible)
+        # A reasoning model can put the whole plan in its trace and return an
+        # empty answer, so the final parse finds nothing. The plan built line by
+        # line while streaming is the better record, and it is never discarded
+        # in favour of a worse one — that is what made a plan appear and then
+        # vanish, leaving the model with nothing to work through.
+        if len(steps) < len(drafted):
+            steps = drafted
+            visible = "\n".join(drafted)
         if len(steps) < 2:
-            self.todo.clear()   # one step is not a plan; do not clutter the prompt
-            self.emit("todo", {"todo": self.todo})
+            if len(self.todo.items) < 2:
+                self.todo.clear()   # one step is not a plan; do not clutter it
+                self.emit("todo", {"todo": self.todo})
             return
         self.todo.set_plan(visible, title=title)
         self.emit("todo", {"todo": self.todo})

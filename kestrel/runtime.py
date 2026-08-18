@@ -49,6 +49,7 @@ class Runtime:
     main_gpu: int = 0
     tensor_split: str = ""
     gpu_budget_mb: int = 0        # 0 = ask the device; otherwise an override
+    cpu_moe: bool = False         # keep mixture-of-experts weights on the CPU
 
     rope_scaling: str = ""
     rope_freq_base: float = 0.0
@@ -73,6 +74,11 @@ class Runtime:
         # Resolved by build_command, which knows the model and the device.
         if self.n_gpu_layers >= 0:
             a += ["-ngl", str(self.n_gpu_layers)]
+        if self.cpu_moe:
+            # A mixture-of-experts model activates a fraction of its weights per
+            # token, so the idle experts are the cheapest thing to leave in
+            # system RAM.
+            a += ["--cpu-moe"]
         if self.threads:
             a += ["-t", str(self.threads)]
         if self.threads_batch:
@@ -94,6 +100,9 @@ class Runtime:
         if self.mlock:
             a.append("--mlock")
         if self.no_kv_offload:
+            # The cache lives in system RAM while the weights stay on the GPU:
+            # graphics memory goes to what benefits most from being there, and
+            # the cache sits where there is room for it.
             a.append("-nkvo")
         if self.parallel:
             a += ["-np", str(self.parallel)]
@@ -339,6 +348,17 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
         )
     rt = cfg.runtime
     cmd = server_argv(binary) + ["--host", rt.host, "--port", str(rt.port)]
+    if with_model and model_path:
+        # Without --mmproj the image encoder is simply absent and the model
+        # behaves as a text model, which is what made a vision model look like
+        # one.
+        try:
+            from . import gguf as _gguf
+            info = _gguf.read(model_path, want_template=False)
+            if info.projector:
+                cmd += ["--mmproj", info.projector]
+        except Exception:
+            pass
     if rt.n_gpu_layers < 0 and with_model:
         cmd += ["-ngl", str(resolve_gpu_layers(cfg, model_path))]
 

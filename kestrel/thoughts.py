@@ -59,6 +59,7 @@ class Thought:
     text: str
     when: float = 0.0
     repeats: int = 1
+    task: str = ""
 
     @property
     def key(self) -> str:
@@ -77,12 +78,18 @@ class ThoughtLog:
         path = log.path
         if path is None or not path.exists():
             return log
+        current_task = ""
         try:
             for line in path.read_text("utf-8").splitlines():
+                heading = re.match(r"^## (.*)$", line.strip())
+                if heading:
+                    current_task = heading.group(1)
+                    continue
                 match = re.match(r"^- \*\*(\d+)\*\*\s+(.*)$", line.strip())
                 if match:
                     log.entries.append(Thought(step=int(match.group(1)),
-                                               text=match.group(2)))
+                                               text=match.group(2),
+                                               task=current_task))
         except OSError:
             pass
         return log
@@ -102,17 +109,25 @@ class ThoughtLog:
         if len(summary) < 12:
             return False, 0
         key = fingerprint(summary)
-        for entry in reversed(self.entries[-40:]):
+        for entry in reversed([e for e in self.entries[-40:]
+                               if not self.task or e.task == self.task]):
             if entry.key == key:
                 entry.repeats += 1
                 self.save()
                 return False, entry.repeats
-        self.entries.append(Thought(step=step, text=summary, when=time.time()))
+        self.entries.append(Thought(step=step, text=summary, when=time.time(),
+                                    task=self.task))
         self.entries = self.entries[-MAX_ENTRIES:]
         self.save()
         return True, 1
 
     def start_task(self, task: str) -> None:
+        """Name what is being worked on now.
+
+        Recall is per task, not per project. Reasoning about last week's
+        installer is not context for today's question — carrying it over is how
+        a fresh request arrives with a page of irrelevant history attached.
+        """
         self.task = " ".join(str(task or "").split())[:120]
 
     def clear(self) -> None:
@@ -134,7 +149,11 @@ class ThoughtLog:
         lines.append("One line per step, so the reasoning behind the work "
                      "survives the conversation it happened in.")
         lines.append("")
+        seen_task = None
         for entry in self.entries[-120:]:
+            if entry.task != seen_task:
+                seen_task = entry.task
+                lines += ["", f"## {entry.task or 'general'}", ""]
             again = f"  _(considered {entry.repeats} times)_" if entry.repeats > 1 else ""
             lines.append(f"- **{entry.step}** {entry.text}{again}")
         try:
@@ -148,7 +167,10 @@ class ThoughtLog:
         """The compact form shown to the model each step."""
         if not self.entries:
             return ""
-        recent = self.entries[-limit:]
+        mine = [e for e in self.entries if e.task == self.task] if self.task else []
+        if not mine:
+            return ""
+        recent = mine[-limit:]
         lines = ["## Already considered"]
         for entry in recent:
             again = f" (x{entry.repeats})" if entry.repeats > 1 else ""

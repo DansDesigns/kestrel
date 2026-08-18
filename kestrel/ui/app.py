@@ -110,6 +110,17 @@ class AgentWorker(QObject):
         if self.agent:
             self.agent.reset()
 
+    @Slot(str)
+    def rebind(self, workspace: str) -> None:
+        if self.agent:
+            self.agent.rebind(workspace)
+
+    @Slot()
+    def forget_project(self) -> None:
+        if self.agent:
+            count = self.agent.forget_project_memories()
+            self.statusLine.emit(f"Cleared {count} project memory(ies)")
+
     def set_paused(self, paused: bool) -> None:
         if self.agent:
             self.agent.pause() if paused else self.agent.resume()
@@ -608,6 +619,8 @@ class MainWindow(QWidget):
     requestPrepare = Signal()
     requestSend = Signal(str)
     requestReset = Signal()
+    requestRebind = Signal(str)
+    requestForgetProject = Signal()
     transcriptReady = Signal(str)
     statusReady = Signal(str)
     serverFailed = Signal(str)
@@ -1502,6 +1515,8 @@ class MainWindow(QWidget):
         self.requestPrepare.connect(self.worker.prepare)
         self.requestSend.connect(self.worker.send)
         self.requestReset.connect(self.worker.reset)
+        self.requestRebind.connect(self.worker.rebind)
+        self.requestForgetProject.connect(self.worker.forget_project)
         self.worker.ready.connect(self.on_ready)
         self.worker.failed.connect(self.on_failed)
         self.worker.token.connect(self.chat.stream)
@@ -1703,6 +1718,58 @@ class MainWindow(QWidget):
         self.bar_status.setText(message)
         self.log.appendPlainText("[ui] " + message)
 
+    def _preflight(self, path: str) -> bool:
+        """Check the model can fit before spending a minute finding out.
+
+        Two models of the same size can need very different amounts of memory:
+        the weights are only part of it, and the KV cache scales with layers,
+        key/value heads and context length. A 16 GB model with a wide cache can
+        need more than a 17 GB one with a narrow one, which is why the larger
+        file loads and the smaller does not.
+        """
+        try:
+            from .. import gguf as ggufmod
+            info = ggufmod.read(path, want_template=False)
+        except Exception:
+            return True
+        if not info.n_layer:
+            return True
+        ctx = self.cfg.runtime.ctx_size or 4096
+        bits = 8 if self.cfg.runtime.cache_type_k.startswith("q8") else 16
+        needed = ggufmod.estimate_vram_mb(info, ctx, bits)
+        try:
+            sample = sysmon.Monitor().sample()
+            usable = max(0, sample.mem_total_mb - 4096)   # leave the OS room
+        except Exception:
+            return True
+        if not usable or needed <= usable:
+            return True
+
+        fits = ggufmod.context_that_fits(info, usable, bits)
+        kv = ggufmod.kv_bytes(info, ctx, bits) / 1024 ** 3
+        box = QMessageBox(self)
+        box.setWindowTitle("This may not fit")
+        box.setText(f"{Path(path).name} needs about {needed / 1024:.1f} GB at "
+                    f"{ctx:,} context, and this machine has roughly "
+                    f"{usable / 1024:.1f} GB to give.")
+        box.setInformativeText(
+            f"The weights are {info.size_gb:.1f} GB; the KV cache accounts for "
+            f"{kv:.1f} GB of the rest, and it grows with context length."
+            + (f"\n\nAt {fits:,} context it would fit." if fits else ""))
+        smaller = (box.addButton(f"Use {fits:,} context", QMessageBox.AcceptRole)
+                   if fits else None)
+        anyway = box.addButton("Load anyway", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(smaller or anyway)
+        box.exec()
+        clicked = box.clickedButton()
+        if smaller is not None and clicked is smaller:
+            self.cfg.runtime.ctx_size = fits
+            self.cfg.save()
+            self._with("params_panel", lambda p: p.refresh_preview())
+            return True
+        return clicked is anyway
+
     def load_model(self, path: str) -> None:
         """Probe first, on a thread, then continue on the GUI thread."""
         server = self.cluster.server
@@ -1743,6 +1810,9 @@ class MainWindow(QWidget):
         if not getattr(self, "_loading_path", "") == path:
             self._ngl_retries = 0        # a different model starts fresh
             self._loading_path = path
+            if not self._preflight(path):
+                self._status("Load cancelled")
+                return
         self.cluster.stop_server()
         self._status(f"Loading {Path(path).name}…")
         self.chat.add_note(f"Loading {Path(path).name}…")
@@ -1770,6 +1840,19 @@ class MainWindow(QWidget):
             if ok and (server.adopted or server.running):
                 self.cfg.server_url = url
                 self._ngl_retries = 0
+                # Remember whether this model can see, so an attached image is
+                # sent rather than described.
+                try:
+                    from .. import gguf as ggufmod
+                    info = ggufmod.read(path, want_template=False)
+                    self.cfg.model_vision = bool(info.vision and info.projector)
+                    if info.vision and not info.projector:
+                        self.statusReady.emit(
+                            f"{Path(path).name} can read images, but no mmproj "
+                            "file was found beside it — download the projector "
+                            "to enable that.")
+                except Exception:
+                    self.cfg.model_vision = False
                 self.statusReady.emit(f"Loaded {Path(path).name}")
                 self.requestPrepare.emit()
             else:
@@ -1841,24 +1924,83 @@ class MainWindow(QWidget):
         self._status("Checking for a running server")
         self.maybe_autostart()
 
+    def _recovery_ladder(self) -> list[tuple[str, dict]]:
+        """What to try, in order, when a model will not load.
+
+        Ordered by what it costs to give up. Moving the cache to system RAM
+        costs a little speed and keeps every layer on the GPU; moving the idle
+        experts of a mixture-of-experts model costs little because most of them
+        are not used for any given token. Only after those does the offload
+        itself come down, and only after that the context — the one change that
+        alters what the model can actually do.
+        """
+        rt = self.cfg.runtime
+        attempted = getattr(self.cluster.server, "attempted_ngl", -1)
+        steps: list[tuple[str, dict]] = []
+        if not rt.no_kv_offload:
+            steps.append(("keeping the KV cache in system RAM",
+                          {"no_kv_offload": True}))
+        if not rt.cpu_moe:
+            steps.append(("keeping the mixture-of-experts weights on the CPU",
+                          {"cpu_moe": True}))
+        if not rt.cache_type_k.startswith("q8"):
+            steps.append(("using an 8-bit KV cache, which halves it",
+                          {"cache_type_k": "q8_0", "cache_type_v": "q8_0"}))
+        if attempted > 8:
+            steps.append((f"halving the GPU offload to {attempted // 2} layers",
+                          {"n_gpu_layers": attempted // 2}))
+        if attempted > 0:
+            steps.append(("running entirely on the CPU", {"n_gpu_layers": 0}))
+        current = rt.ctx_size or 4096
+        if current > 4096:
+            steps.append((f"halving the context to {max(4096, current // 2):,}",
+                          {"ctx_size": max(4096, current // 2)}))
+        return steps
+
+    def _retry_with_less_context(self, _summary: str) -> bool:
+        """Nothing on the GPU and it still will not fit: shrink the cache.
+
+        The remaining lever is context length, and halving it halves the KV
+        cache — which on a wide model is several gigabytes.
+        """
+        current = self.cfg.runtime.ctx_size or 4096
+        if self._ngl_retries >= 3 or current <= 4096:
+            return False
+        self._ngl_retries += 1
+        self.cfg.runtime.ctx_size = max(4096, current // 2)
+        self.cfg.save()
+        self.chat.add_note(
+            f"Still would not fit with nothing on the GPU. Trying again at "
+            f"{self.cfg.runtime.ctx_size:,} context — the KV cache is what is "
+            "too large, and it scales with context.", theme.AMBER)
+        self._with("params_panel", lambda p: p.refresh_preview())
+        QTimer.singleShot(200, lambda: self.load_model(self.cfg.model_path))
+        return True
+
     def _retry_with_less_gpu(self, summary: str) -> bool:
         """Halve the GPU offload and try again, down to running on the CPU."""
-        server = self.cluster.server
-        attempted = getattr(server, "attempted_ngl", -1)
-        if attempted <= 0 or self._ngl_retries >= 3:
-            return False
         if not clustermod.looks_like_oom(summary):
             return False
-        nxt = 0 if attempted <= 4 else attempted // 2
+        if self._ngl_retries >= 6:
+            self.chat.add_error(
+                "It will not fit on this machine at any setting tried — cache "
+                "in system RAM, experts on the CPU, 8-bit cache, no offload, "
+                "and a smaller context. A smaller quantisation is the next "
+                "thing to try.")
+            return False
+        steps = self._recovery_ladder()
+        if not steps:
+            return False
+        description, changes = steps[0]
         self._ngl_retries += 1
-        self.cfg.runtime.n_gpu_layers = nxt
+        for key, value in changes.items():
+            setattr(self.cfg.runtime, key, value)
         self.cfg.save()
-        where = (f"{nxt} layers on the GPU" if nxt else "everything on the CPU")
-        self.chat.add_note(
-            f"That did not fit in graphics memory. Retrying with {where}.",
-            theme.AMBER)
-        self._status(f"Retrying with -ngl {nxt}")
-        self.busy_overlay.update_detail(f"retrying with {where}")
+        self.chat.add_note(f"That did not fit. Trying again {description}.",
+                           theme.AMBER)
+        self._status(f"Retrying: {description}")
+        self.busy_overlay.update_detail(description)
+        self._with("params_panel", lambda p: p.refresh_preview())
         QTimer.singleShot(200, lambda: self.load_model(self.cfg.model_path))
         return True
 
@@ -2095,7 +2237,11 @@ class MainWindow(QWidget):
         self.chat.clear()
         self.chat.clear_log()
         self.activity.clear()
-        self.requestReset.emit()
+        self.attachments = []
+        self._replies.clear()
+        # Not just a reset: the checklist, thinking log, memory scope and file
+        # sandbox all belong to a folder and have to move with it.
+        self.requestRebind.emit(path)
         self.projects_panel.refresh()
         if self.memory_panel is not None:
             self._with("memory_panel", lambda p: p.reopen())
@@ -2158,7 +2304,7 @@ class MainWindow(QWidget):
     @Slot()
     def on_turn_finished(self) -> None:
         self.typing.stop()
-        self.chat.apply_pending_toggle()
+        self.chat.finish_turn()
         self._ring()
         agent = self.worker.agent
         unfinished = bool(agent is not None and agent.todo is not None
@@ -2187,10 +2333,14 @@ class MainWindow(QWidget):
         if not text or self.busy:
             return
         self.input.clear()
+        payload = text
         if self.attachments:
-            # Named in the message so the model knows what it was given, with
-            # the contents following.
-            text = (text + "\n\n" + attachmod.summarise(self.attachments)).strip()
+            # Pictures travel as pictures when the model can read them, and as
+            # a description when it cannot.
+            payload = attachmod.message_content(self.attachments, text,
+                                                vision=self.cfg.model_vision)
+            if isinstance(payload, str):
+                text = payload
             self.clear_attachments()
         agent = self.worker.agent
         self._pending_prompt = text
@@ -2297,6 +2447,11 @@ class MainWindow(QWidget):
         if agent is not None and agent.todo is not None:
             agent.todo.clear()
             self.plan_panel.update_todo(agent.todo)
+        # A new session starts the project's memory over too. What was learnt
+        # about the machine and about the person is kept: neither stopped being
+        # true because a conversation ended.
+        self.requestForgetProject.emit()
+        self.attachments = []
         self.requestReset.emit()
         self.chat.clear()
         self.chat.clear_log()

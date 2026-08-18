@@ -53,10 +53,15 @@ class GGUFInfo:
     n_ctx_train: int = 0
     n_layer: int = 0
     n_embd: int = 0
+    n_head: int = 0
+    n_head_kv: int = 0          # fewer than n_head under grouped-query attention
+    head_dim: int = 0
     n_params: int = 0
     tensor_count: int = 0
     file_size: int = 0
     parts: int = 1
+    vision: bool = False        # the weights include an image encoder
+    projector: str = ""         # a separate mmproj file that supplies one
     chat_template: str = ""
     error: str = ""
     kv: dict = field(default_factory=dict)
@@ -201,6 +206,7 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
         return info
 
     info.kv = {k: v for k, v in kv.items() if k != "tokenizer.chat_template"}
+    detect_vision(info, kv)
     arch = str(kv.get("general.architecture") or "")
     info.architecture = arch
     info.name = str(kv.get("general.name") or p.stem)
@@ -222,7 +228,10 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
 
     for key, attr in ((f"{arch}.context_length", "n_ctx_train"),
                       (f"{arch}.block_count", "n_layer"),
-                      (f"{arch}.embedding_length", "n_embd")):
+                      (f"{arch}.embedding_length", "n_embd"),
+                      (f"{arch}.attention.head_count", "n_head"),
+                      (f"{arch}.attention.head_count_kv", "n_head_kv"),
+                      (f"{arch}.attention.key_length", "head_dim")):
         v = kv.get(key)
         if isinstance(v, int):
             setattr(info, attr, v)
@@ -239,18 +248,47 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
     return info
 
 
-def estimate_vram_mb(info: GGUFInfo, n_ctx: int, cache_bits: int = 16) -> int:
-    """Rough memory needed to hold weights plus KV cache, in MB.
+def kv_bytes(info: GGUFInfo, n_ctx: int, cache_bits: int = 16) -> int:
+    """Bytes of KV cache for this model at this context length.
 
-    Deliberately approximate — it exists to answer 'will this fit', not to be
-    exact. KV cache is 2 (K and V) * layers * embedding * ctx * bytes.
+    Grouped-query attention is the whole point of doing this properly: a model
+    with 64 query heads but 8 key/value heads needs an eighth of the cache the
+    embedding width alone would suggest. Assuming otherwise overstates the
+    requirement several times over on exactly the modern models people run.
     """
-    weights = info.file_size
-    kv = 0
-    if info.n_layer and info.n_embd and n_ctx:
-        kv = 2 * info.n_layer * info.n_embd * n_ctx * (cache_bits / 8)
+    if not (info.n_layer and n_ctx):
+        return 0
+    if info.n_head_kv and info.n_head and info.n_embd:
+        head_dim = info.head_dim or (info.n_embd // max(1, info.n_head))
+        per_token = 2 * info.n_layer * info.n_head_kv * head_dim
+    else:
+        per_token = 2 * info.n_layer * info.n_embd      # no GQA data: assume none
+    return int(per_token * n_ctx * (cache_bits / 8))
+
+
+def estimate_vram_mb(info: GGUFInfo, n_ctx: int, cache_bits: int = 16) -> int:
+    """Rough memory needed to hold weights plus KV cache, in MB."""
     overhead = 300 * 1024 * 1024
-    return int((weights + kv + overhead) / (1024 ** 2))
+    return int((info.file_size + kv_bytes(info, n_ctx, cache_bits) + overhead)
+               / (1024 ** 2))
+
+
+def context_that_fits(info: GGUFInfo, budget_mb: int, cache_bits: int = 16,
+                      floor: int = 2048) -> int:
+    """The largest context whose weights and cache fit in `budget_mb`.
+
+    Used to answer the question a failed load raises: not "why", but "what
+    would work". Rounded down to a multiple of 1024 because odd context
+    lengths help nobody.
+    """
+    spare = budget_mb * 1024 * 1024 - info.file_size - 300 * 1024 * 1024
+    if spare <= 0 or not info.n_layer:
+        return 0
+    per_token = kv_bytes(info, 1, cache_bits)
+    if per_token <= 0:
+        return 0
+    fits = int(spare / per_token)
+    return max(floor, (fits // 1024) * 1024) if fits >= floor else 0
 
 
 def layers_that_fit(info: GGUFInfo, vram_mb: int, n_ctx: int,
@@ -270,8 +308,9 @@ def layers_that_fit(info: GGUFInfo, vram_mb: int, n_ctx: int,
         return 0
     per_layer_mb = (info.file_size / (1024 ** 2)) / info.n_layer
     kv_per_layer_mb = 0.0
-    if info.n_embd and n_ctx:
-        kv_per_layer_mb = (2 * info.n_embd * n_ctx * (cache_bits / 8)) / (1024 ** 2)
+    if n_ctx and info.n_layer:
+        kv_per_layer_mb = (kv_bytes(info, n_ctx, cache_bits) / info.n_layer
+                           / (1024 ** 2))
     cost = per_layer_mb + kv_per_layer_mb
     if cost <= 0:
         return 0
@@ -286,3 +325,73 @@ def layers_that_fit(info: GGUFInfo, vram_mb: int, n_ctx: int,
     if budget <= 0:
         return 0
     return max(0, min(info.n_layer, int(budget / cost)))
+
+
+# Architectures that ship an image encoder, and the metadata keys that prove it.
+VISION_KEYS = ("clip.has_vision_encoder", "clip.vision.embedding_length",
+               "vision.block_count", "mm.projector_type",
+               "gemma3.vision.block_count", "qwen2vl.vision.block_count")
+VISION_ARCHES = ("gemma3", "gemma4", "qwen2vl", "qwen2_5_vl", "qwen3vl",
+                 "llava", "minicpmv", "internvl", "pixtral", "mllama",
+                 "idefics", "smolvlm", "moondream", "paligemma")
+PROJECTOR_HINTS = ("mmproj", "projector", "vision", "-vit", "clip")
+
+
+def find_projector(path: Path) -> str:
+    """A sibling mmproj file, which is how llama.cpp is given an image encoder.
+
+    Vision models are usually published as two files: the language weights and
+    a projector. Loading only the first gives a model that quietly cannot see,
+    which is indistinguishable from a text model unless the pair is noticed.
+    """
+    try:
+        folder = Path(path).parent
+        stem = Path(path).stem.lower()
+        candidates = []
+        for f in folder.glob("*.gguf"):
+            name = f.name.lower()
+            if f.resolve() == Path(path).resolve():
+                continue
+            if any(hint in name for hint in PROJECTOR_HINTS):
+                candidates.append(f)
+        if not candidates:
+            return ""
+        # The projector has to belong to *this* model. Any mmproj in the folder
+        # would otherwise be attached to every model in it, which is worse than
+        # finding none: llama.cpp would be handed an encoder for other weights.
+        tokens = {t for t in re.split(r"[-_.\s]+", stem)
+                  if len(t) > 2 and not t.startswith("q")}
+        best, score = "", 0
+        for f in candidates:
+            other = {t for t in re.split(r"[-_.\s]+", f.name.lower())
+                     if len(t) > 2}
+            shared = len(tokens & other)
+            if shared > score:
+                best, score = str(f), shared
+        return best if score >= 2 else ""
+    except OSError:
+        return ""
+
+
+def detect_vision(info: "GGUFInfo", meta: dict | None = None) -> None:
+    """Fill in `vision` and `projector` for a model already read."""
+    meta = meta or {}
+    if any(key in meta for key in VISION_KEYS):
+        info.vision = True
+    arch = (info.architecture or "").lower()
+    if any(a in arch for a in VISION_ARCHES):
+        info.vision = True
+    # The file name is weak evidence on its own — "gemma3" in a name may be a
+    # text-only variant — so it counts only alongside a projector or metadata.
+    name = Path(info.path).name.lower().replace("-", "").replace("_", "") \
+        if info.path else ""
+    named_vision = any(a in name for a in VISION_ARCHES)
+    if info.path:
+        info.projector = find_projector(Path(info.path))
+        if info.projector:
+            info.vision = True
+        elif named_vision and not info.vision:
+            # A known vision family with no projector beside it: it can see in
+            # principle but not as installed, which is worth saying plainly.
+            info.projector = ""
+            info.vision = True
