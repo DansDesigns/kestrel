@@ -25,6 +25,7 @@ from .context import Budget, ContextManager, budget_for
 from .llm import ChatResult, LlamaClient, LLMError
 from .memory import CAPTURE_PROMPT, MemoryStore, parse_capture
 from .tokens import TokenCounter
+from . import handover as handovermod
 from .thoughts import ThoughtLog
 from .todo import DONE, TodoList
 from .tools import Registry, ToolResult, build_registry
@@ -358,6 +359,7 @@ class Agent:
         self.paused = threading.Event()
         self._recent: list[str] = []       # signatures, for loop detection
         self.thoughts = ThoughtLog()       # replaced with the project's log on prepare
+        self.handover = handovermod.Handover()
         self._prose_streak = 0
         self.skills: list[skillmod.Skill] = []
         self.registry: Registry | None = None
@@ -408,6 +410,7 @@ class Agent:
 
         self.todo = TodoList.load(self.cfg.workspace_path())
         self.thoughts = ThoughtLog.load(self.cfg.workspace_path())
+        self.handover = handovermod.load(self.cfg.workspace_path())
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         self.registry = build_registry(self.cfg, lambda: self.skills,
@@ -548,6 +551,10 @@ class Agent:
         self._system_cache = ""
         return self.skills
 
+    def name_session(self, label: str) -> None:
+        """Tell the thinking log which conversation it is recording."""
+        self.thoughts.start_session(label)
+
     def load_history(self, messages: list[dict], digest: str = "") -> None:
         """Adopt a saved conversation. The transcript is restored as-is and will
         be re-fitted to the budget on the next turn, so a session saved on a
@@ -588,6 +595,7 @@ class Agent:
         self.reset()
         self.todo = TodoList.load(workspace) if self.cfg.todo_enabled else None
         self.thoughts = ThoughtLog.load(workspace)
+        self.handover = handovermod.load(workspace)
         if self.memory is not None:
             self.memory.scope = self.cfg.memory_scope()
         # The registry closes over the workspace for its file sandbox, so it is
@@ -633,7 +641,12 @@ class Agent:
         self.thoughts.start_task(user_text)
         briefing = self._plan_briefing()
         thoughts = self._thought_block()
-        opening = "\n\n".join(x for x in (briefing, thoughts) if x)
+        # Only at the start of a conversation: mid-conversation the transcript
+        # already says everything the handover would.
+        resume = (self.handover.block()
+                  if len(self.history) <= 1 and not handovermod.stale(self.handover)
+                  else "")
+        opening = "\n\n".join(x for x in (resume, briefing, thoughts) if x)
         if opening:
             # A dozen lines of what has already been considered, for a model
             # whose own trace was discarded after the turn that produced it.
@@ -658,6 +671,7 @@ class Agent:
                                          memory_block, plan_block)
             self.emit("context", {"usage": self.ctx.usage, "budget": self.budget,
                                   "compactions": self.ctx.compactions, "step": step})
+            self._handover_if_compacted()
             if self.todo:
                 self.emit("todo", {"todo": self.todo})
 
@@ -714,6 +728,7 @@ class Agent:
                 if not answer:
                     answer = "(the model returned nothing usable)"
                 answer = self._lift_code(answer)
+                self._handover_if_unfinished()
                 self.history.append({"role": "assistant", "content": answer})
                 self._turn_log.append(f"assistant: {answer}")
                 self.emit("assistant", {"text": answer})
@@ -742,6 +757,7 @@ class Agent:
                     final = collapse_repeats(
                         str(call.args.get("answer") or "").strip()) or "Done."
                     final = self._lift_code(final)
+                    self._handover_if_unfinished()
                     self.history.append({"role": "assistant", "content": final})
                     self._turn_log.append(f"assistant: {final}")
                     self.emit("assistant", {"text": final})
@@ -915,6 +931,60 @@ class Agent:
         if moved:
             self.emit("canvas", {"blocks": moved})
         return rewritten
+
+    def _handover_if_unfinished(self) -> None:
+        """A turn ending with the checklist open is a natural handover point."""
+        if self.todo is None or not self.todo.items or self.todo.complete:
+            return
+        self.write_handover("the task is unfinished")
+
+    def _handover_if_compacted(self) -> None:
+        """The moment the transcript is summarised is the moment to write one.
+
+        After compaction the detail is gone for good; a handover captures what
+        mattered while the model can still see it.
+        """
+        if self.ctx is None:
+            return
+        if self.ctx.compactions > getattr(self, "_compactions_seen", 0):
+            self._compactions_seen = self.ctx.compactions
+            self.write_handover("the context was compacted")
+
+    def write_handover(self, reason: str = "") -> str:
+        """Summarise the state of the work, and keep it beside the project.
+
+        Called when the context is compacted — the moment the detail stops
+        being available — and when a turn ends with the checklist still open.
+        Both are points at which the next turn would otherwise start knowing
+        less than this one did.
+        """
+        if not self.history:
+            return ""
+        plan = self.todo.render() if self.todo and self.todo.items else "No plan."
+        recent = "\n".join(self._turn_log[-14:])[:4000]
+        task = self.thoughts.task or self._first_user_message()
+        prompt = handovermod.PROMPT.format(task=task or "(not stated)",
+                                           plan=plan, recent=recent)
+        try:
+            res = self.client.chat(self._helper_messages(prompt),
+                                   temperature=0.1, max_tokens=400, stream=False,
+                                   model=self.cfg.model)
+        except Exception:
+            return ""
+        body = collapse_repeats(reasoning.split(res.content)[0]).strip()
+        if len(body) < 40:
+            return ""
+        self.handover = handovermod.Handover(
+            task=task, body=body, when=time.time(), turns=len(self.history) // 2)
+        handovermod.save(self.cfg.workspace_path(), self.handover)
+        self.emit("handover", {"reason": reason, "text": body})
+        return body
+
+    def _first_user_message(self) -> str:
+        for message in self.history:
+            if message.get("role") == "user":
+                return " ".join(str(message.get("content") or "").split())[:120]
+        return ""
 
     def _plan_briefing(self) -> str:
         """Aim the model at a checklist it did not write.

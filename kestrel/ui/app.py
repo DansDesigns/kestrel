@@ -111,6 +111,11 @@ class AgentWorker(QObject):
             self.agent.reset()
 
     @Slot(str)
+    def name_session(self, label: str) -> None:
+        if self.agent:
+            self.agent.name_session(label)
+
+    @Slot(str)
     def rebind(self, workspace: str) -> None:
         if self.agent:
             self.agent.rebind(workspace)
@@ -413,6 +418,13 @@ class ClusterPanel(UiThread, QWidget):
 
     def probe(self) -> None:
         def work():
+            # Checked once per run of the test: a mismatch explains a node that
+            # connects and drops far better than a latency figure does.
+            warning = clustermod.version_warning(self.cfg.llama_server_bin,
+                                                 self.cfg.rpc_bin)
+            if warning:
+                self.logLine.emit("[probe] " + warning)
+                self.ui(lambda: self.statusLine.emit(warning))
             results = clustermod.probe_all(self.cfg.nodes)
 
             def show():
@@ -621,6 +633,7 @@ class MainWindow(QWidget):
     requestReset = Signal()
     requestRebind = Signal(str)
     requestForgetProject = Signal()
+    requestNameSession = Signal(str)
     transcriptReady = Signal(str)
     statusReady = Signal(str)
     serverFailed = Signal(str)
@@ -1517,6 +1530,7 @@ class MainWindow(QWidget):
         self.requestReset.connect(self.worker.reset)
         self.requestRebind.connect(self.worker.rebind)
         self.requestForgetProject.connect(self.worker.forget_project)
+        self.requestNameSession.connect(self.worker.name_session)
         self.worker.ready.connect(self.on_ready)
         self.worker.failed.connect(self.on_failed)
         self.worker.token.connect(self.chat.stream)
@@ -1879,7 +1893,17 @@ class MainWindow(QWidget):
         self._status("llama-server did not start")
         self.chat.add_error("llama-server did not start.\n" + summary)
         hint = ""
-        if "unknown command" in summary:
+        if clustermod.compute_buffer_failure(summary):
+            rt = self.cfg.runtime
+            hint = ("\n\nThis is the compute buffer, not the weights or the KV "
+                    "cache. It is sized by the batch, so a model can fail here "
+                    "while comfortably fitting in memory — and a larger model "
+                    "with a narrower batch will load where this one did not."
+                    f"\n\nBatch is currently {rt.batch_size or 2048} with a "
+                    f"micro-batch of {rt.ubatch_size or 512}. Try 512 and 128 "
+                    "under Params \u2192 Runtime; it costs prompt-processing "
+                    "speed and nothing else.")
+        elif "unknown command" in summary:
             hint = ("\n\nThat message comes from the unified `llama` binary, which "
                     "expects a subcommand. Kestrel calls `llama serve` for it — if "
                     "you see this, the configured binary may be an older or "
@@ -1937,6 +1961,23 @@ class MainWindow(QWidget):
         rt = self.cfg.runtime
         attempted = getattr(self.cluster.server, "attempted_ngl", -1)
         steps: list[tuple[str, dict]] = []
+
+        # The compute buffer is sized by the batch, not by the model or the
+        # context, and "failed to allocate compute pp buffers" is that buffer
+        # rather than the weights or the cache. Shrinking it costs
+        # prompt-processing speed and nothing else, so it comes first.
+        batch = rt.batch_size or 2048
+        ubatch = rt.ubatch_size or 512
+        if ubatch > 128 or batch > 512:
+            steps.append((f"reducing the batch to {min(512, batch)} and the "
+                          f"micro-batch to {min(128, ubatch)}, which is what "
+                          "sizes the compute buffer",
+                          {"batch_size": min(512, batch),
+                           "ubatch_size": min(128, ubatch)}))
+        elif ubatch > 32:
+            steps.append(("reducing the micro-batch further, to 32",
+                          {"batch_size": 128, "ubatch_size": 32}))
+
         if not rt.no_kv_offload:
             steps.append(("keeping the KV cache in system RAM",
                           {"no_kv_offload": True}))
@@ -1981,12 +2022,12 @@ class MainWindow(QWidget):
         """Halve the GPU offload and try again, down to running on the CPU."""
         if not clustermod.looks_like_oom(summary):
             return False
-        if self._ngl_retries >= 6:
+        if self._ngl_retries >= 8:
             self.chat.add_error(
-                "It will not fit on this machine at any setting tried — cache "
-                "in system RAM, experts on the CPU, 8-bit cache, no offload, "
-                "and a smaller context. A smaller quantisation is the next "
-                "thing to try.")
+                "It will not fit on this machine at any setting tried — a "
+                "smaller batch, the cache in system RAM, experts on the CPU, an "
+                "8-bit cache, no GPU offload, and a smaller context. A smaller "
+                "quantisation is the next thing to try.")
             return False
         steps = self._recovery_ladder()
         if not steps:
@@ -2258,6 +2299,7 @@ class MainWindow(QWidget):
             self._status("Not connected yet")
             return
         self.session = session
+        self.requestNameSession.emit(session.id)
         agent.load_history(session.messages, session.digest)
         if agent.todo is not None:
             # The checklist belongs to this conversation, not to whatever was
@@ -2443,6 +2485,7 @@ class MainWindow(QWidget):
     def new_session(self) -> None:
         self._save_session()
         self.session = sessionmod.new_session()
+        self.requestNameSession.emit(self.session.id)
         agent = self.worker.agent
         if agent is not None and agent.todo is not None:
             agent.todo.clear()

@@ -60,6 +60,7 @@ class Thought:
     when: float = 0.0
     repeats: int = 1
     task: str = ""
+    session: str = ""
 
     @property
     def key(self) -> str:
@@ -70,6 +71,7 @@ class Thought:
 class ThoughtLog:
     root: Path | None = None
     task: str = ""
+    session: str = ""
     entries: list[Thought] = field(default_factory=list)
 
     @classmethod
@@ -79,8 +81,13 @@ class ThoughtLog:
         if path is None or not path.exists():
             return log
         current_task = ""
+        current_session = ""
         try:
             for line in path.read_text("utf-8").splitlines():
+                session_head = re.match(r"^# (?!Thinking log)(.*)$", line.strip())
+                if session_head:
+                    current_session = session_head.group(1)
+                    continue
                 heading = re.match(r"^## (.*)$", line.strip())
                 if heading:
                     current_task = heading.group(1)
@@ -89,7 +96,8 @@ class ThoughtLog:
                 if match:
                     log.entries.append(Thought(step=int(match.group(1)),
                                                text=match.group(2),
-                                               task=current_task))
+                                               task=current_task,
+                                               session=current_session))
         except OSError:
             pass
         return log
@@ -110,16 +118,21 @@ class ThoughtLog:
             return False, 0
         key = fingerprint(summary)
         for entry in reversed([e for e in self.entries[-40:]
-                               if not self.task or e.task == self.task]):
+                               if (not self.task or e.task == self.task)
+                               and (not self.session or e.session == self.session)]):
             if entry.key == key:
                 entry.repeats += 1
                 self.save()
                 return False, entry.repeats
         self.entries.append(Thought(step=step, text=summary, when=time.time(),
-                                    task=self.task))
+                                    task=self.task, session=self.session))
         self.entries = self.entries[-MAX_ENTRIES:]
         self.save()
         return True, 1
+
+    def start_session(self, session: str) -> None:
+        """Name the conversation these thoughts belong to."""
+        self.session = " ".join(str(session or "").split())[:60]
 
     def start_task(self, task: str) -> None:
         """Name what is being worked on now.
@@ -149,10 +162,12 @@ class ThoughtLog:
         lines.append("One line per step, so the reasoning behind the work "
                      "survives the conversation it happened in.")
         lines.append("")
-        seen_task = None
-        for entry in self.entries[-120:]:
-            if entry.task != seen_task:
-                seen_task = entry.task
+        seen = (None, None)
+        for entry in self.entries[-160:]:
+            if (entry.session, entry.task) != seen:
+                if entry.session != seen[0]:
+                    lines += ["", f"# {entry.session or 'unnamed conversation'}"]
+                seen = (entry.session, entry.task)
                 lines += ["", f"## {entry.task or 'general'}", ""]
             again = f"  _(considered {entry.repeats} times)_" if entry.repeats > 1 else ""
             lines.append(f"- **{entry.step}** {entry.text}{again}")
@@ -167,7 +182,12 @@ class ThoughtLog:
         """The compact form shown to the model each step."""
         if not self.entries:
             return ""
-        mine = [e for e in self.entries if e.task == self.task] if self.task else []
+        # Recall is narrowed twice: to this conversation, and to this task
+        # within it. Reasoning from another conversation is someone else's
+        # working, however recent.
+        mine = [e for e in self.entries
+                if e.task == self.task
+                and (not self.session or e.session == self.session)] if self.task else []
         if not mine:
             return ""
         recent = mine[-limit:]

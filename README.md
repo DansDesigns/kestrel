@@ -660,12 +660,27 @@ Updated 2026-08-16 23:10 · 2 of 3 done
 - [ ] Verify the file reads back
 ```
 
+**HANDOVER.md** — what a competent colleague would write on a card before going
+home: where the work is, what has been done, what is next, which files were
+touched, and what is in the way. Written when the context is compacted — the
+moment the detail stops being available — and when a turn ends with the
+checklist still open.
+
+It is loaded at the start of a conversation, so a full context window or a
+deliberate fresh start no longer loses the thread: the next conversation in the
+same project opens knowing what the last one was doing. It is a summary and says
+so, telling the model to check anything it is unsure of rather than assume. A
+note older than three days is not resumed silently.
+
 **THOUGHTS.md** — one line of reasoning per step. A reasoning trace is discarded
 after the turn that produced it, which is why a small model can think the same
 thought at step 2, step 5 and step 9. A dozen summarised lines cost a few dozen
 tokens and answer the question that actually prevents it: what have I already
 considered? Repetitions are counted rather than appended, and a thought reached
-three times is marked as such to the model and in the file.
+three times is marked as such to the model and in the file. Recall is narrowed
+twice — to this conversation and to this task within it — because reasoning from
+another conversation is someone else's working, however recent. The file keeps
+everything, grouped by conversation and then by task.
 
 Both are plain markdown, so the state of a piece of work is legible without
 Kestrel running. Switching folder switches all four together — an agent that
@@ -842,6 +857,19 @@ models of similar file size:
 The smaller file needs more memory. That is why one loads and the other does
 not, and why the answer is context length rather than a smaller download.
 
+**Three different things can fail to allocate**, and they have different fixes:
+
+| Message | What ran out | Fix |
+|---|---|---|
+| `failed to allocate compute pp buffers` | The compute buffer | A smaller batch |
+| Allocation failures naming the model or backend buffer | Weights or KV cache | Less offload, smaller cache, less context |
+| `unable to allocate backend buffer` | The device | Fewer layers on it |
+
+The compute buffer is sized by the batch, not by the model or the context, so a
+model can fail here while fitting in memory comfortably — and a larger model
+with a narrower batch will load where a smaller one did not. Kestrel names this
+case specifically rather than reporting a generic allocation failure.
+
 **The cache does not have to live on the GPU.** `--no-kv-offload` keeps it in
 system RAM while every layer of weights stays on the device, which is usually
 the right trade: the weights are read constantly and benefit most from being
@@ -853,12 +881,13 @@ Params → Runtime.
 **The recovery ladder** applies these in order of what they cost, retrying after
 each failure:
 
-1. keep the KV cache in system RAM
-2. keep the mixture-of-experts weights on the CPU
-3. use an 8-bit KV cache, halving it
-4. halve the GPU offload — repeatedly
-5. run entirely on the CPU
-6. halve the context
+1. reduce the batch and micro-batch, which is what sizes the compute buffer
+2. keep the KV cache in system RAM
+3. keep the mixture-of-experts weights on the CPU
+4. use an 8-bit KV cache, halving it
+5. halve the GPU offload — repeatedly
+6. run entirely on the CPU
+7. halve the context
 
 Context is last because it is the only one that changes what the model can
 actually do; everything above it costs speed and nothing else. When the ladder

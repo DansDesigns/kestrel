@@ -17,7 +17,8 @@ import sys
 import threading
 
 from . import llamacpp
-from .cluster import BEACON_MAGIC, broadcast
+from .cluster import (BEACON_MAGIC, binary_build, broadcast, broadcast_targets,
+                      firewall_hint)
 from .config import Config
 
 
@@ -91,6 +92,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.cache:
         cmd.append("-c")
 
+    build = binary_build(binary)
+    print(f"rpc-server: {binary}" + (f"  (llama.cpp build {build})" if build else ""))
+    print("Every machine in a cluster must run the same llama.cpp build — the "
+          "RPC protocol changes between them, and a mismatch connects and then "
+          "drops straight away.")
+    hint = firewall_hint(args.port, args.beacon_port)
+    if hint:
+        print()
+        print(hint)
+    print()
+
     stop = threading.Event()
     if not args.no_beacon:
         payload = {
@@ -101,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
             "mem_mb": args.mem,
             "pid": os.getpid(),
         }
-        threading.Thread(target=broadcast, args=(args.beacon_port, payload, 3.0, stop),
+        threading.Thread(target=broadcast,
+                         args=(args.beacon_port, payload, 3.0, stop, print),
                          daemon=True).start()
         print(f"beacon: {payload['host']}:{args.port} as '{args.label}' "
               f"({args.mem or 'auto'} MB) on udp/{args.beacon_port}")

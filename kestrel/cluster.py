@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import socket
 import subprocess
 import threading
@@ -75,13 +76,30 @@ class Probe:
 
 def probe(node: Node, timeout: float = 1.5) -> Probe:
     """rpc-server speaks a raw ggml protocol, so a TCP handshake is the honest
-    check — anything more would need a matching client build."""
+    check — anything more would need a matching client build.
+
+    The connection is closed abruptly rather than politely. rpc-server handles
+    one client at a time: a graceful close leaves the socket in TIME_WAIT and
+    the worker briefly refusing the next connection, which is what made a node
+    appear to connect, drop, connect and drop while never being usable.
+    """
     started = time.time()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
     try:
-        with socket.create_connection((node.host, int(node.port)), timeout=timeout):
-            return Probe(node, True, (time.time() - started) * 1000)
+        sock.connect((node.host, int(node.port)))
+        # SO_LINGER with a zero timeout sends RST instead of FIN: the worker
+        # sees the client vanish and returns to accepting immediately.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                        struct.pack("ii", 1, 0))
+        return Probe(node, True, (time.time() - started) * 1000)
     except OSError as e:
         return Probe(node, False, 0.0, str(e))
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def probe_all(nodes: list[Node], timeout: float = 1.5) -> list[Probe]:
@@ -140,15 +158,100 @@ def discover(port: int = 50051, seconds: float = 3.0,
     return list(found.values())
 
 
-def broadcast(port: int, payload: dict, interval: float, stop: threading.Event) -> None:
+def binary_build(path: str, timeout: float = 6.0) -> str:
+    """The llama.cpp build number a binary reports, or "" if it will not say.
+
+    Worth knowing because the RPC protocol carries a version: a worker built
+    from a different commit than the head will accept the connection and then
+    drop it, over and over, which reads as a flapping network rather than the
+    version mismatch it is.
+    """
+    if not path:
+        return ""
+    for args in (["--version"], ["-v"]):
+        try:
+            out = subprocess.run([path, *args], capture_output=True, text=True,
+                                 timeout=timeout,
+                                 creationflags=getattr(subprocess,
+                                                       "CREATE_NO_WINDOW", 0))
+        except Exception:
+            continue
+        blob = (out.stdout or "") + (out.stderr or "")
+        match = re.search(r"build[:=]?\s*(\d+)", blob, re.I)
+        if match:
+            return match.group(1)
+        match = re.search(r"b(\d{3,5})\b", blob)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def version_warning(server_bin: str, rpc_bin: str) -> str:
+    """A plain sentence when two builds will not talk to each other."""
+    head, worker = binary_build(server_bin), binary_build(rpc_bin)
+    if not head or not worker or head == worker:
+        return ""
+    return (f"This machine's llama-server is build {head} and its rpc-server is "
+            f"build {worker}. The RPC protocol changes between builds, and a "
+            "mismatch connects and then immediately disconnects. Use the same "
+            "build everywhere.")
+
+
+def firewall_hint(port: int, beacon_port: int) -> str:
+    """What to run on Windows so other machines can see this one."""
+    if os.name != "nt":
+        return ""
+    return (
+        "Windows blocks incoming connections by default, which is why a node "
+        "can be visible from Linux but not from another Windows machine.\n"
+        "In an administrator prompt:\n"
+        f'  netsh advfirewall firewall add rule name="Kestrel node" '
+        f'dir=in action=allow protocol=TCP localport={port}\n'
+        f'  netsh advfirewall firewall add rule name="Kestrel beacon" '
+        f'dir=in action=allow protocol=UDP localport={beacon_port}')
+
+
+def broadcast_targets() -> list[str]:
+    """Every address worth announcing on.
+
+    255.255.255.255 is a limited broadcast and is not forwarded past the first
+    interface the operating system picks. On Linux that is usually the LAN; on
+    Windows, with a Hyper-V switch, WSL adapter or VPN present, it is often one
+    of those instead — so the beacon goes out and nobody hears it. Sending to
+    each interface's own broadcast address as well removes the guesswork.
+    """
+    targets = ["255.255.255.255"]
+    try:
+        import psutil
+        for entries in psutil.net_if_addrs().values():
+            for entry in entries:
+                if entry.family != socket.AF_INET or not entry.broadcast:
+                    continue
+                if entry.address.startswith("127."):
+                    continue
+                if entry.broadcast not in targets:
+                    targets.append(entry.broadcast)
+    except Exception:
+        pass
+    return targets
+
+
+def broadcast(port: int, payload: dict, interval: float, stop: threading.Event,
+              on_log=None) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     blob = json.dumps(payload).encode("utf-8")
+    announced = False
     while not stop.is_set():
-        try:
-            sock.sendto(blob, ("255.255.255.255", int(port)))
-        except OSError:
-            pass
+        targets = broadcast_targets()
+        if not announced and on_log:
+            on_log("announcing on " + ", ".join(targets))
+            announced = True
+        for target in targets:
+            try:
+                sock.sendto(blob, (target, int(port)))
+            except OSError:
+                continue
         stop.wait(interval)
     sock.close()
 
@@ -229,6 +332,21 @@ def is_port_problem(text: str) -> bool:
     if "out of memory" in low or "allocat" in low:
         return False                      # that is a different failure entirely
     return any(marker in low for marker in PORT_TROUBLE)
+
+
+COMPUTE_BUFFER = ("compute pp buffers", "compute buffer", "failed to create "
+                  "context", "pinned memory")
+
+
+def compute_buffer_failure(text: str) -> bool:
+    """Did this fail on the compute buffer rather than the model itself?
+
+    Worth telling apart: that buffer is sized by the batch, so the fix is a
+    smaller batch rather than a smaller model, and the two are easily confused
+    because both report as an allocation failure.
+    """
+    low = (text or "").lower()
+    return any(marker in low for marker in COMPUTE_BUFFER)
 
 
 def looks_like_oom(text: str) -> bool:
