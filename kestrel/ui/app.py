@@ -2376,6 +2376,12 @@ class MainWindow(QWidget):
             return
         self.input.clear()
         payload = text
+        # Pictures are shown in the transcript, whether or not the model can
+        # read them: what was attached should be visible in the record of the
+        # conversation.
+        for item in self.attachments:
+            if item.kind == "image":
+                self.chat.add_image(str(item.path), item.name)
         if self.attachments:
             # Pictures travel as pictures when the model can read them, and as
             # a description when it cannot.

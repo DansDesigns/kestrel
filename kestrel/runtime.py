@@ -348,17 +348,6 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
         )
     rt = cfg.runtime
     cmd = server_argv(binary) + ["--host", rt.host, "--port", str(rt.port)]
-    if with_model and model_path:
-        # Without --mmproj the image encoder is simply absent and the model
-        # behaves as a text model, which is what made a vision model look like
-        # one.
-        try:
-            from . import gguf as _gguf
-            info = _gguf.read(model_path, want_template=False)
-            if info.projector:
-                cmd += ["--mmproj", info.projector]
-        except Exception:
-            pass
     if rt.n_gpu_layers < 0 and with_model:
         cmd += ["-ngl", str(resolve_gpu_layers(cfg, model_path))]
 
@@ -369,6 +358,16 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
         if not Path(model).exists():
             raise FileNotFoundError(f"Model file not found: {model}")
         cmd += ["-m", str(model)]
+        # The projector goes with the weights. Without it llama.cpp loads the
+        # language model alone and the result behaves as a text model — which
+        # is exactly how a vision model comes to be reported as one.
+        try:
+            from . import gguf as _gguf
+            info = _gguf.read(model, want_template=False)
+            if info.projector and Path(info.projector).exists():
+                cmd += ["--mmproj", str(info.projector)]
+        except Exception:
+            pass
     else:
         # Router mode: no model, so none of the model-loading flags apply. The
         # unified `llama serve` rejects flags it does not recognise and exits,

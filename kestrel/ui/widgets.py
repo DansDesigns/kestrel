@@ -9,11 +9,13 @@ creeps right you can see a compaction coming before it happens.
 from __future__ import annotations
 
 import html
+from pathlib import Path
 import re
 
-from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (QEvent, QObject, QRectF, QSize, Qt, QTimer,
+                            QUrl, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
-                           QPixmap,
+                           QImage, QPixmap, QTextDocument,
                            QPainter, QPen,
                            QPixmap, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
@@ -253,6 +255,9 @@ class ChatView(QTextBrowser):
         self._thought_no = 0
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
+        self._image_no = 0
+        self._images: dict[int, tuple] = {}
+        self._images_open: set[int] = set()
         self._pending_toggle = False
         self._live = False
         # Links are the only clickable element a text document offers; buttons
@@ -271,6 +276,9 @@ class ChatView(QTextBrowser):
         self._thought_no = 0
         self._thought_full: dict[int, str] = {}
         self._thought_open: set[int] = set()
+        self._image_no = 0
+        self._images: dict[int, tuple] = {}
+        self._images_open: set[int] = set()
         self._pending_toggle = False
         self._live = False
         # Links are the only clickable element QTextEdit offers; buttons cannot
@@ -294,6 +302,13 @@ class ChatView(QTextBrowser):
         number = int(index or 0)
         if action == "thought":
             self.toggle_thought(number)
+            return
+        if action == "image":
+            self._images_open ^= {number}
+            if self.streaming():
+                self._pending_toggle = True
+            else:
+                self.rerender()
             return
         self.actionRequested.emit(action, number)
 
@@ -430,6 +445,43 @@ class ChatView(QTextBrowser):
             f'<b>[{html.escape(speaker)}]</b></div>'
             f'<div style="color:{theme.TEXT};{style}">{body_html}</div>'
             f'</td></tr></table>')
+
+    PREVIEW_WIDTH = 260
+
+    def add_image(self, path: str, caption: str = "") -> None:
+        """Show a picture in the transcript, small until it is clicked.
+
+        A thumbnail is the right default — an attached screenshot is context for
+        a question, not the subject of the page — but a thumbnail of a screenshot
+        is unreadable, so clicking gives the full width.
+        """
+        self._record("add_image", path, caption)
+        self._add_image(path, caption)
+
+    def _add_image(self, path: str, caption: str = "") -> None:
+        image = QImage(str(path))
+        if image.isNull():
+            self.add_note(f"Could not display {Path(path).name}", theme.TEXT_DIM)
+            return
+        self._image_no += 1
+        index = self._image_no
+        name = f"kestrel-image-{index}"
+        self.document().addResource(QTextDocument.ImageResource,
+                                    QUrl(name), image)
+        self._images[index] = (str(path), image.width(), image.height())
+        expanded = index in self._images_open
+        room = max(200, self.viewport().width() - 90)
+        width = min(image.width(), room if expanded else self.PREVIEW_WIDTH)
+        label = "shrink" if expanded else "expand"
+        note = html.escape(caption or Path(path).name)
+        body = (f'<img src="{name}" width="{int(width)}">'
+                f'<div style="color:{theme.TEXT_DIM};font-size:10px;margin-top:4px;">'
+                f'{note} · {image.width()}x{image.height()}  '
+                f'<a href="kestrel:image:{index}" '
+                f'style="color:{theme.SIGNAL};text-decoration:none;">[{label}]</a>'
+                f'</div>')
+        self._append(self.bubble("You", body, theme.SIGNAL, theme.BUBBLE_YOU,
+                                 align="right", width="72%"))
 
     def add_user(self, text: str) -> None:
         self._record("add_user", text)
@@ -681,6 +733,7 @@ class ChatView(QTextBrowser):
             self._thought_buf = ""
             self._reply_no = 0      # replay reproduces the same numbering
             self._thought_no = 0
+            self._image_no = 0
             for kind, args in entries:
                 getattr(self, kind)(*args)
         finally:

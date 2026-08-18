@@ -839,6 +839,17 @@ finding none. The Models tab says whether a model reads images and which
 projector it found; a known vision family with no projector beside it is
 reported as needing one rather than being silently downgraded.
 
+The projector is passed as `--mmproj` alongside `-m`, so the encoder loads with
+the weights rather than the language model coming up alone.
+
+Attached pictures appear in the transcript as previews, 260px wide, with the
+filename and dimensions beneath and a link to expand them to the full width of
+the column. A thumbnail is the right default — an attached screenshot is context
+for a question rather than the subject of the page — but a thumbnail of a
+screenshot is unreadable, so one click gives the whole thing. They are shown
+whether or not the model can read them: what was attached belongs in the record
+of the conversation either way.
+
 With a projector loaded, attached images are sent as images. Without one they
 are described — dropping them silently is how a model ends up answering about a
 picture it was never shown.
