@@ -750,6 +750,18 @@ byte-identical to the original.
 
 ## 8c. A team on one model
 
+**Roles and personas are not the same thing**, and both are worth having. A
+persona is who Kestrel is *to you* — tone, manner, background — applied across
+the session, with its own tiering so the full character costs nothing until the
+model asks for it. A role is what someone *does*: a speciality, its own
+conversation, a place work can be handed to.
+
+They compose. A role with no persona of its own inherits the session's, so a
+whole team can speak in one voice; give a role a persona and it speaks in that
+one instead. The **Agents** tab has the selector. Each role also carries a short
+brief — what the job is, not what the character is like, which is the persona's
+business.
+
 The usual way to build several agents is to give each its own model, which on a
 laptop means loading none of them. Kestrel does the opposite: one set of weights
 stays loaded and the **role** is swapped around it — briefing, conversation and

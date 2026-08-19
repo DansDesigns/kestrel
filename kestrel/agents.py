@@ -52,8 +52,10 @@ class AgentProfile:
 
     name: str
     speciality: str = ""
-    voice: str = ""                 # how it should sound and behave
-    persona_file: str = ""          # or a persona from the Persona tab
+    # What the role does. Character — tone, manner, background — belongs to a
+    # persona, which is a richer thing with its own tiering and its own file.
+    brief: str = ""
+    persona_file: str = ""          # a persona for this role, or "" to inherit
     tools: list[str] = field(default_factory=list)   # empty means all of them
     status: str = IDLE
     activity: str = ""              # what it is doing, in a few words
@@ -78,8 +80,8 @@ class AgentProfile:
         lines = [f"You are {self.name}."]
         if self.speciality:
             lines.append(f"Your speciality: {self.speciality}.")
-        if self.voice:
-            lines.append(self.voice)
+        if self.brief:
+            lines.append(self.brief)
         lines.append(
             "You are one of several agents sharing this project. Hand work over "
             "by writing files to the whiteboard folder, and use agent_send to "
@@ -134,12 +136,14 @@ class Roster:
     def current(self) -> AgentProfile | None:
         return self.get(self.active) or (self.agents[0] if self.agents else None)
 
-    def add(self, name: str, speciality: str = "", voice: str = "") -> AgentProfile:
+    def add(self, name: str, speciality: str = "", brief: str = "",
+            persona_file: str = "") -> AgentProfile:
         existing = self.get(name)
         if existing:
             return existing
-        agent = AgentProfile(name=name.strip()[:40], speciality=speciality.strip()[:120],
-                             voice=voice.strip())
+        agent = AgentProfile(name=name.strip()[:40],
+                             speciality=speciality.strip()[:120],
+                             brief=brief.strip(), persona_file=persona_file)
         self.agents.append(agent)
         if not self.active:
             self.active = agent.name
@@ -277,7 +281,7 @@ def _default_team() -> list[AgentProfile]:
         AgentProfile(
             name="Lead",
             speciality="breaking work down and deciding what happens next",
-            voice="You are the one the user talks to. You keep the plan honest "
+            brief="You are the one the user talks to. You keep the plan honest "
                   "and you delegate: writing or changing code goes to Builder, "
                   "checking it goes to Reviewer, writing it up goes to Scribe. "
                   "Use the delegate tool rather than doing their work yourself, "
@@ -286,18 +290,18 @@ def _default_team() -> list[AgentProfile]:
         AgentProfile(
             name="Builder",
             speciality="writing and changing code",
-            voice="You write the code. You work in the canvas, save real files, "
+            brief="You write the code. You work in the canvas, save real files, "
                   "and you say what you changed rather than pasting it back."),
         AgentProfile(
             name="Reviewer",
             speciality="reading code for faults before they are shipped",
-            voice="You look for what will break. You are specific about lines "
+            brief="You look for what will break. You are specific about lines "
                   "and reasons, and you say when something is fine rather than "
                   "inventing problems."),
         AgentProfile(
             name="Scribe",
             speciality="notes, documentation and keeping the whiteboard tidy",
-            voice="You write things down so they survive the conversation. "
+            brief="You write things down so they survive the conversation. "
                   "Short, plain, and where someone will find it."),
     ]
 

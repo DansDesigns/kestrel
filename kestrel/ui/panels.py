@@ -25,6 +25,7 @@ from .. import canvas as canvasmod
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
                 speech as speechmod, sysmon)
 from .. import memory as memorymod
+from ..config import config_dir
 from ..memory import KINDS, MemoryStore
 from ..todo import BLOCKED, DISPLAY_MARKS, DOING, DONE, MARKS, TODO
 from ..runtime import CACHE_TYPES, REASONING_FORMATS, ROPE_SCALING, SPLIT_MODES
@@ -2662,7 +2663,9 @@ class AgentsPanel(QWidget):
         lay.setSpacing(6)
 
         blurb = QLabel("One model, several roles. Clicking a name switches who "
-                       "answers and shows their conversation.")
+                       "answers and shows their conversation. A role says what "
+                       "someone does; a persona says how they sound — a team "
+                       "can share one voice or have their own.")
         blurb.setWordWrap(True)
         blurb.setObjectName("Dim")
         lay.addWidget(blurb)
@@ -2683,6 +2686,13 @@ class AgentsPanel(QWidget):
         self.detail.setWordWrap(True)
         self.detail.setObjectName("Dim")
         lay.addWidget(self.detail)
+
+        # Which character this role speaks as. Blank means the session's
+        # persona, so a team can share one voice or each have their own.
+        self.persona_box = QComboBox()
+        self.persona_box.currentIndexChanged.connect(self._persona_chosen)
+        lay.addWidget(Field("Persona for this role", self.persona_box,
+                            "Leave as inherited to use the session's persona."))
 
         row = QHBoxLayout()
         for text, slot, tip in (("Talk to", self.switch, "Switch the chat to this agent"),
@@ -2736,12 +2746,41 @@ class AgentsPanel(QWidget):
             return None
         return self.roster.get(item.data(0, Qt.UserRole))
 
+    def _fill_personas(self) -> None:
+        self.persona_box.blockSignals(True)
+        self.persona_box.clear()
+        self.persona_box.addItem("inherited from the session", "")
+        for found in personamod.discover(
+                personamod.default_persona_dirs(config_dir(), self.cfg.workspace)):
+            self.persona_box.addItem(found.name, str(found.path))
+        self.persona_box.blockSignals(False)
+
+    def _persona_chosen(self, _index: int) -> None:
+        agent = self._selected()
+        if agent is None or self.roster is None:
+            return
+        chosen = self.persona_box.currentData() or ""
+        if chosen == agent.persona_file:
+            return
+        agent.persona_file = chosen
+        self.roster.save()
+        self.rosterEdited.emit()
+        self.statusLine.emit(
+            f"{agent.name} now speaks as "
+            + (self.persona_box.currentText() if chosen else "the session persona"))
+
     def _show(self) -> None:
         agent = self._selected()
         if agent is None:
             self.detail.setText("")
             return
         self.detail.setText(f"{agent.name} — {agent.summary()}\n{agent.speciality}")
+        if self.persona_box.count() <= 1:
+            self._fill_personas()
+        index = self.persona_box.findData(agent.persona_file or "")
+        self.persona_box.blockSignals(True)
+        self.persona_box.setCurrentIndex(max(0, index))
+        self.persona_box.blockSignals(False)
 
     # -- actions -------------------------------------------------------------
     def switch(self) -> None:
@@ -2756,10 +2795,10 @@ class AgentsPanel(QWidget):
             return
         speciality, _ = QInputDialog.getText(self, "New agent",
                                              f"What is {name.strip()} for?")
-        voice, _ = QInputDialog.getMultiLineText(
-            self, "New agent", "How should they behave? (optional)")
+        brief, _ = QInputDialog.getMultiLineText(
+            self, "New agent", "What should they do, and how? (optional)")
         if self.roster is not None:
-            self.roster.add(name, speciality or "", voice or "")
+            self.roster.add(name, speciality or "", brief or "")
             self.rosterEdited.emit()
             self.refresh()
             self.statusLine.emit(f"Added {name.strip()}")

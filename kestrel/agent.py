@@ -485,6 +485,15 @@ class Agent:
             return ""
 
     def _load_persona(self):
+        # A role can carry its own character; without one it inherits the
+        # session's. Personas and agents answer different questions — who
+        # Kestrel is to you, and what this role does — so they compose rather
+        # than replace each other.
+        agent = self.roster.current() if self.roster else None
+        if agent is not None and agent.persona_file:
+            p = personamod.load_file(agent.persona_file)
+            if p is not None:
+                return p
         if self.cfg.persona_file:
             p = personamod.load_file(self.cfg.persona_file)
             if p is not None:
@@ -598,6 +607,7 @@ class Agent:
             self.roster.note(target.name, status=WORKING, activity=task[:60])
             self.roster.switch(target.name)
             self.history = [dict(m) for m in target.history]
+            self.persona = self._load_persona()
             self._system_cache = ""
             brief = (f"{caller_name} has asked you to do this:\n\n{task}\n\n"
                      "Do the work now and report back briefly — what you did, "
@@ -613,6 +623,7 @@ class Agent:
             if caller_name:
                 self.roster.switch(caller_name)
             self.history = caller_history
+            self.persona = self._load_persona()
             self._system_cache = ""
             self._delegation_depth -= 1
         self.emit("delegated", {"to": target.name, "text": answer})
@@ -636,6 +647,7 @@ class Agent:
         if agent is None:
             return ""
         self.history = [dict(m) for m in agent.history]
+        self.persona = self._load_persona()      # the role may have its own
         self.roster.note(agent.name, status=IDLE, activity="")
         self._system_cache = ""
         self.thoughts.start_session(f"{agent.name}")
