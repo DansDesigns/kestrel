@@ -11,7 +11,8 @@ from pathlib import Path
 from PySide6.QtCore import (QFileSystemWatcher, QObject, QSize, QThread, Qt,
                             QTimer, Signal, Slot)
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QTextOption
+from PySide6.QtGui import (QAction, QDesktopServices, QKeySequence, QPixmap,
+                           QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QScrollArea, QSizePolicy,
                                QDialogButtonBox, QFileDialog, QFormLayout,
@@ -32,8 +33,8 @@ from ..agent import Agent, strip_calls
 from ..config import Config, Node
 from ..llm import LlamaClient, LLMError
 from . import theme
-from .panels import (BackendPanel, CanvasPanel, MemoryPanel, ModelsPanel,
-                     ParamsPanel,
+from .panels import (AgentsPanel, BackendPanel, CanvasPanel, MemoryPanel,
+                     ModelsPanel, ParamsPanel,
                      PersonaPanel, PlanPanel, ProjectsPanel, SpeechPanel,
                      SystemPanel, ToolsPanel, UiThread, _row)
 from .downloads_window import DownloadsWindow
@@ -64,6 +65,9 @@ class AgentWorker(QObject):
     todoUpdate = Signal(object)
     turnFinished = Signal()
     pausedChanged = Signal(bool)
+    agentSwitched = Signal(str, list)
+    delegating = Signal(str, str)
+    delegated = Signal(str, str)
 
     def __init__(self, cfg: Config, progress=None):
         super().__init__()
@@ -89,7 +93,7 @@ class AgentWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
     @Slot(str)
-    def send(self, text: str) -> None:
+    def send(self, text) -> None:
         if self.agent is None:
             # Connection is staged and may not have finished. Typing before it
             # does should mean waiting a moment, not losing the message.
@@ -109,6 +113,13 @@ class AgentWorker(QObject):
     def reset(self) -> None:
         if self.agent:
             self.agent.reset()
+
+    @Slot(str)
+    def switch_agent(self, name: str) -> None:
+        if not self.agent:
+            return
+        if self.agent.switch_agent(name):
+            self.agentSwitched.emit(name, list(self.agent.history))
 
     @Slot(str)
     def name_session(self, label: str) -> None:
@@ -160,6 +171,10 @@ class AgentWorker(QObject):
             self.memoryRecall.emit(data["memories"])
         elif kind == "memory_saved":
             self.memorySaved.emit(data["items"])
+        elif kind == "delegating":
+            self.delegating.emit(str(data.get("to") or ""), str(data.get("task") or ""))
+        elif kind == "delegated":
+            self.delegated.emit(str(data.get("to") or ""), str(data.get("text") or ""))
         elif kind == "todo":
             self.todoUpdate.emit(data["todo"])
         elif kind == "paused":
@@ -629,11 +644,15 @@ class SkillsPanel(QWidget):
 # ------------------------------------------------------------ main window --
 class MainWindow(QWidget):
     requestPrepare = Signal()
-    requestSend = Signal(str)
+    # `object` rather than `str`: a message with pictures in it is a list of
+    # parts, and stringifying it here is how the images were being dropped
+    # between the composer and the model.
+    requestSend = Signal(object)
     requestReset = Signal()
     requestRebind = Signal(str)
     requestForgetProject = Signal()
     requestNameSession = Signal(str)
+    requestSwitchAgent = Signal(str)
     transcriptReady = Signal(str)
     statusReady = Signal(str)
     serverFailed = Signal(str)
@@ -666,6 +685,7 @@ class MainWindow(QWidget):
         self.memory_panel = self.persona_panel = self.speech_panel = None
         self.backend_panel = self.system_panel = self.tools_panel = None
         self.canvas_panel = None
+        self.agents_panel = None
         self._tool_list: list[dict] = []
         self._gen_start = None
         self._gen_last = 0.0
@@ -745,8 +765,9 @@ class MainWindow(QWidget):
         # Vertical icon rail: nine horizontal tabs never fitted a narrow panel,
         # and elided text ("S...", "M...") named nothing. Icons plus tooltips
         # stay legible at any width.
-        self._icon_tabs = ["status", "models", "params", "persona", "cluster",
-                           "tools", "skills", "memory", "speech", "backend"]
+        self._icon_tabs = ["status", "models", "params", "persona", "agents",
+                           "cluster", "tools", "skills", "memory", "speech",
+                           "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -766,6 +787,8 @@ class MainWindow(QWidget):
                     "Params")
         left.addTab(self._lazy(lambda: PersonaPanel(self.cfg), self._wire_persona),
                     "Persona")
+        left.addTab(self._lazy(lambda: AgentsPanel(self.cfg), self._wire_agents),
+                    "Agents")
 
         self.progress("checking the cluster")
         self.cluster = ClusterPanel(self.cfg)
@@ -814,13 +837,20 @@ class MainWindow(QWidget):
         self.input.setPlaceholderText("Give Kestrel a task.   Enter to send, Shift+Enter for a new line.")
         self.input.setMaximumHeight(96)
         self.input.installEventFilter(self)
+        # A strip of what is attached, with thumbnails: a filename tells you a
+        # picture is there, a picture tells you which one.
+        self.attach_strip = QWidget()
+        self.attach_row = QHBoxLayout(self.attach_strip)
+        self.attach_row.setContentsMargins(2, 2, 2, 2)
+        self.attach_row.setSpacing(8)
         self.attach_bar = QLabel("")
         self.attach_bar.setObjectName("Dim")
         self.attach_bar.setWordWrap(True)
         self.attach_bar.setCursor(Qt.PointingHandCursor)
         self.attach_bar.mousePressEvent = lambda _e: self.clear_attachments()
-        self.attach_bar.hide()
-        clay.addWidget(self.attach_bar)
+        self.attach_row.addWidget(self.attach_bar, 1)
+        self.attach_strip.hide()
+        clay.addWidget(self.attach_strip)
         clay.addWidget(self.input)
 
         # Only the two actions that belong to the message itself stay here; the
@@ -1274,6 +1304,57 @@ class MainWindow(QWidget):
         p.statusLine.connect(self._status)
         p.appearanceChanged.connect(self.apply_appearance)
 
+    def _wire_agents(self, p) -> None:
+        self.agents_panel = p
+        p.statusLine.connect(self._status)
+        p.agentChosen.connect(self.switch_agent)
+        p.set_roster(self._roster())
+
+    def _roster(self):
+        agent = self.worker.agent
+        return getattr(agent, "roster", None) if agent is not None else None
+
+    @Slot(str)
+    def switch_agent(self, name: str) -> None:
+        """Change who is answering, and show their conversation."""
+        if self.busy:
+            self._status("Busy — wait for the current turn to finish")
+            return
+        self.requestSwitchAgent.emit(name)
+
+    @Slot(str, list)
+    @Slot(str, str)
+    def _delegating(self, to: str, task: str) -> None:
+        self.chat.add_note(f"→ handing to {to}: {task[:70]}", theme.VIOLET)
+        self.typing.set_label(f"{to} is working")
+        self._with("agents_panel", lambda p: p.refresh())
+
+    @Slot(str, str)
+    def _delegated(self, to: str, text: str) -> None:
+        self.chat.add_note(f"← {to}: {' '.join(text.split())[:90]}", theme.VIOLET)
+        self._with("agents_panel", lambda p: p.refresh())
+
+    @Slot(str, list)
+    def _agent_switched(self, name: str, history: list) -> None:
+        self.chat.clear()
+        self.chat.clear_log()
+        self._replies.clear()
+        self._reply_no = 0
+        for message in history:
+            role = message.get("role")
+            text = message.get("content")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if role == "user" and not text.startswith("["):
+                self.chat.add_user(text)
+            elif role == "assistant":
+                self.chat.begin_assistant()
+                self.chat.end_assistant(text)
+        self.chat.finish_turn()
+        self.chat.add_note(f"You are now talking to {name}.", theme.AMBER)
+        self._with("agents_panel", lambda p: p.refresh())
+        self._status(f"Switched to {name}")
+
     def _wire_canvas(self, p) -> None:
         self.canvas_panel = p
         p.statusLine.connect(self._status)
@@ -1531,6 +1612,8 @@ class MainWindow(QWidget):
         self.requestRebind.connect(self.worker.rebind)
         self.requestForgetProject.connect(self.worker.forget_project)
         self.requestNameSession.connect(self.worker.name_session)
+        self.requestSwitchAgent.connect(self.worker.switch_agent)
+        self.worker.agentSwitched.connect(self._agent_switched)
         self.worker.ready.connect(self.on_ready)
         self.worker.failed.connect(self.on_failed)
         self.worker.token.connect(self.chat.stream)
@@ -1556,6 +1639,8 @@ class MainWindow(QWidget):
         self.worker.memoryRecall.connect(self.on_memory_recall)
         self.worker.memorySaved.connect(self.on_memory_saved)
         self.worker.todoUpdate.connect(self.plan_panel.update_todo)
+        self.worker.delegating.connect(self._delegating)
+        self.worker.delegated.connect(self._delegated)
         self.plan_panel.pauseToggled.connect(self.worker.set_paused)
         self.plan_panel.planEdited.connect(self._plan_edited)
         self.plan_panel.statusLine.connect(self._status)
@@ -2402,7 +2487,7 @@ class MainWindow(QWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.continue_btn.setEnabled(False)
-        self.requestSend.emit(text)
+        self.requestSend.emit(payload)
 
     def attach_files(self) -> None:
         """Read files into the next message.
@@ -2427,12 +2512,31 @@ class MainWindow(QWidget):
         self._show_attachments()
 
     def _show_attachments(self) -> None:
+        # Rebuild the thumbnails each time: there are never many, and tracking
+        # which ones changed costs more than redrawing them.
+        while self.attach_row.count() > 1:
+            item = self.attach_row.takeAt(1)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         if not self.attachments:
-            self.attach_bar.hide()
+            self.attach_strip.hide()
             return
         names = ", ".join(a.label for a in self.attachments)
         self.attach_bar.setText(f"Attached: {names}    (clear)")
-        self.attach_bar.show()
+        for item in self.attachments:
+            if item.kind != "image":
+                continue
+            pixmap = QPixmap(str(item.path))
+            if pixmap.isNull():
+                continue
+            thumb = QLabel()
+            thumb.setPixmap(pixmap.scaled(56, 40, Qt.KeepAspectRatio,
+                                          Qt.SmoothTransformation))
+            thumb.setToolTip(f"{item.name} · {item.meta.get('dimensions', '')}")
+            thumb.setStyleSheet(f"border: 1px solid {theme.LINE}; border-radius: 3px;")
+            self.attach_row.addWidget(thumb)
+        self.attach_strip.show()
 
     def clear_attachments(self) -> None:
         self.attachments = []

@@ -139,6 +139,7 @@ class Config:
     show_tool_detail: bool = False    # show arguments and raw output in the transcript
     favourite_models: list[str] = field(default_factory=list)
     canvas_enabled: bool = True       # give the model the shared code canvas
+    team_enabled: bool = True         # several agents sharing one model
     model_vision: bool = False        # the loaded model accepts images
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""

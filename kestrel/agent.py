@@ -26,6 +26,8 @@ from .llm import ChatResult, LlamaClient, LLMError
 from .memory import CAPTURE_PROMPT, MemoryStore, parse_capture
 from .tokens import TokenCounter
 from . import handover as handovermod
+from . import agents as agentsmod
+from .agents import IDLE, Roster, WORKING
 from .thoughts import ThoughtLog
 from .todo import DONE, TodoList
 from .tools import Registry, ToolResult, build_registry
@@ -358,8 +360,11 @@ class Agent:
         self.cancelled = threading.Event()
         self.paused = threading.Event()
         self._recent: list[str] = []       # signatures, for loop detection
+        self._delegations = 0
+        self._delegation_depth = 0
         self.thoughts = ThoughtLog()       # replaced with the project's log on prepare
         self.handover = handovermod.Handover()
+        self.roster = None
         self._prose_streak = 0
         self.skills: list[skillmod.Skill] = []
         self.registry: Registry | None = None
@@ -411,13 +416,16 @@ class Agent:
         self.todo = TodoList.load(self.cfg.workspace_path())
         self.thoughts = ThoughtLog.load(self.cfg.workspace_path())
         self.handover = handovermod.load(self.cfg.workspace_path())
+        self.roster = Roster(self.cfg.workspace_path()) if self.cfg.team_enabled else None
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         self.registry = build_registry(self.cfg, lambda: self.skills,
                                        approver=self._approve,
                                        memory_provider=lambda: self.memory,
                                        todo_provider=lambda: self.todo,
-                                       persona_provider=lambda: self.persona)
+                                       persona_provider=lambda: self.persona,
+                                       roster_provider=lambda: self.roster,
+                                       delegate_fn=self.delegate)
         self.ctx = ContextManager(self.counter, self.budget, summarizer=self._summarize)
         self._system_cache = ""
 
@@ -526,6 +534,7 @@ class Agent:
             persona=self._persona_text(),
             has_plan_tools=bool(self.registry and "plan" in self.registry.tools),
             has_canvas=bool(self.registry and "canvas_write" in self.registry.tools),
+            team=self._team_block(),
         )
         return self._system_cache
 
@@ -550,6 +559,119 @@ class Agent:
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         self._system_cache = ""
         return self.skills
+
+    MAX_DELEGATION_DEPTH = 1
+    MAX_DELEGATIONS_PER_TURN = 4
+
+    def delegate(self, to: str, task: str) -> tuple[bool, str]:
+        """Hand a piece of work to a specialist and wait for the answer.
+
+        They share one model, so this is a real handover rather than a parallel
+        call: the current agent's conversation is put down, the specialist's is
+        picked up, it works, and the lead reads what came back.
+
+        Depth is capped at one. A specialist that can delegate becomes a
+        middle manager, and on a single model that is a queue with extra steps.
+        """
+        if self.roster is None:
+            return False, "There is no team on this project."
+        if self._delegation_depth >= self.MAX_DELEGATION_DEPTH:
+            return False, ("You were delegated this yourself — do it, or say "
+                           "why you cannot.")
+        if self._delegations >= self.MAX_DELEGATIONS_PER_TURN:
+            return False, ("That is enough delegation for one turn. Use what "
+                           "you have and answer.")
+        target = self.roster.get(to)
+        if target is None:
+            known = ", ".join(a.name for a in self.roster.agents)
+            return False, f"There is no agent called {to}. There is: {known}."
+        caller = self.roster.current()
+        if caller is not None and target.name == caller.name:
+            return False, "That is you. Do it yourself."
+
+        caller_name = caller.name if caller else ""
+        caller_history = [dict(m) for m in self.history]
+        self._delegations += 1
+        self._delegation_depth += 1
+        self.emit("delegating", {"to": target.name, "task": task})
+        try:
+            self.roster.note(target.name, status=WORKING, activity=task[:60])
+            self.roster.switch(target.name)
+            self.history = [dict(m) for m in target.history]
+            self._system_cache = ""
+            brief = (f"{caller_name} has asked you to do this:\n\n{task}\n\n"
+                     "Do the work now and report back briefly — what you did, "
+                     "where it is, and anything they need to know. Files go on "
+                     "the whiteboard or in the project, not in your reply.")
+            answer = self.run(brief, nested=True)
+            target.history = [dict(m) for m in self.history]
+            target.turns += 1
+        except Exception as e:
+            answer = f"{target.name} could not finish: {e}"
+        finally:
+            self.roster.note(target.name, status=IDLE, activity="")
+            if caller_name:
+                self.roster.switch(caller_name)
+            self.history = caller_history
+            self._system_cache = ""
+            self._delegation_depth -= 1
+        self.emit("delegated", {"to": target.name, "text": answer})
+        return True, f"{target.name} reports:\n{answer}"
+
+    def switch_agent(self, name: str) -> str:
+        """Become a different member of the team.
+
+        The weights stay exactly where they are. What changes is who the model
+        is being: its briefing, its conversation, and the work it has waiting.
+        That is the whole trick — a team on one model, at the cost of a prompt
+        rebuild rather than a load.
+        """
+        if self.roster is None:
+            return ""
+        current = self.roster.current()
+        if current is not None:
+            current.history = [dict(m) for m in self.history]
+            current.status = IDLE
+        agent = self.roster.switch(name)
+        if agent is None:
+            return ""
+        self.history = [dict(m) for m in agent.history]
+        self.roster.note(agent.name, status=IDLE, activity="")
+        self._system_cache = ""
+        self.thoughts.start_session(f"{agent.name}")
+        self.emit("agent", {"name": agent.name, "speciality": agent.speciality})
+        return agent.name
+
+    def _finish_agent_turn(self) -> None:
+        if self.roster is None:
+            return
+        agent = self.roster.current()
+        if agent is None:
+            return
+        agent.history = [dict(m) for m in self.history]
+        agent.turns += 1
+        self.roster.note(agent.name, status=IDLE, activity="")
+
+    def _team_block(self) -> str:
+        """Who this is, and anything waiting for them."""
+        if self.roster is None:
+            return ""
+        agent = self.roster.current()
+        if agent is None:
+            return ""
+        parts = [agent.briefing()]
+        if self.roster.agents and agent.name == self.roster.agents[0].name:
+            names = [x.name for x in self.roster.agents]
+            suggestion = agentsmod.route(self.thoughts.task, names)
+            if suggestion and suggestion != agent.name:
+                # An opinion, not an instruction: the lead decides, and a
+                # confident wrong routing is worse than none.
+                parts.append(f"This looks like work for {suggestion}. Delegate "
+                             "it unless you have reason not to.")
+        waiting = agent.take_unread()
+        if waiting:
+            parts.append("## Messages\n" + "\n".join(m.line() for m in waiting))
+        return "\n\n".join(parts)
 
     def name_session(self, label: str) -> None:
         """Tell the thinking log which conversation it is recording."""
@@ -596,6 +718,7 @@ class Agent:
         self.todo = TodoList.load(workspace) if self.cfg.todo_enabled else None
         self.thoughts = ThoughtLog.load(workspace)
         self.handover = handovermod.load(workspace)
+        self.roster = Roster(workspace) if self.cfg.team_enabled else None
         if self.memory is not None:
             self.memory.scope = self.cfg.memory_scope()
         # The registry closes over the workspace for its file sandbox, so it is
@@ -604,7 +727,9 @@ class Agent:
                                        approver=self._approve,
                                        memory_provider=lambda: self.memory,
                                        todo_provider=lambda: self.todo,
-                                       persona_provider=lambda: self.persona)
+                                       persona_provider=lambda: self.persona,
+                                       roster_provider=lambda: self.roster,
+                                       delegate_fn=self.delegate)
         self._system_cache = ""
 
     def cancel(self) -> None:
@@ -628,17 +753,35 @@ class Agent:
             time.sleep(0.15)
         self.emit("paused", {"paused": False})
 
-    def run(self, user_text: str) -> str:
+    @staticmethod
+    def _as_text(content) -> str:
+        """The readable part of a message that may contain pictures."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(part.get("text", "") for part in content
+                            if isinstance(part, dict) and part.get("type") == "text")
+        return str(content or "")
+
+    def run(self, user_text, nested: bool = False) -> str:
         if self.registry is None or self.ctx is None:
             self.prepare()
         assert self.registry is not None and self.ctx is not None
 
         self.cancelled.clear()
+        # Kept as given: a list of parts is what llama.cpp expects for a
+        # message with images, and flattening it to text loses the pictures.
+        readable = self._as_text(user_text)
+        if not nested:
+            self._delegations = 0
+        if self.roster is not None and self.roster.current():
+            self.roster.note(self.roster.active, status=WORKING,
+                             activity=readable[:60])
         self.history.append({"role": "user", "content": user_text})
-        self._turn_log = [f"user: {user_text}"]
+        self._turn_log = [f"user: {readable}"]
         self._recent = []
         self._prose_streak = 0
-        self.thoughts.start_task(user_text)
+        self.thoughts.start_task(readable)
         briefing = self._plan_briefing()
         thoughts = self._thought_block()
         # Only at the start of a conversation: mid-conversation the transcript
@@ -652,8 +795,9 @@ class Agent:
             # whose own trace was discarded after the turn that produced it.
             self.history.append({"role": "user", "content": opening})
         self._finish_blocks = 0
-        memory_block = self._memory_block(user_text)
-        self._autoplan(user_text)
+        memory_block = self._memory_block(readable)
+        if not nested:
+            self._autoplan(readable)
         final = ""
 
         for step in range(1, self.cfg.max_steps + 1):
@@ -728,10 +872,12 @@ class Agent:
                 if not answer:
                     answer = "(the model returned nothing usable)"
                 answer = self._lift_code(answer)
-                self._handover_if_unfinished()
+                if not nested:
+                    self._handover_if_unfinished()
                 self.history.append({"role": "assistant", "content": answer})
                 self._turn_log.append(f"assistant: {answer}")
                 self.emit("assistant", {"text": answer})
+                self._finish_agent_turn()
                 self._capture()
                 return answer
 
@@ -757,10 +903,12 @@ class Agent:
                     final = collapse_repeats(
                         str(call.args.get("answer") or "").strip()) or "Done."
                     final = self._lift_code(final)
-                    self._handover_if_unfinished()
+                    if not nested:
+                        self._handover_if_unfinished()
                     self.history.append({"role": "assistant", "content": final})
                     self._turn_log.append(f"assistant: {final}")
                     self.emit("assistant", {"text": final})
+                    self._finish_agent_turn()
                     self._capture()
                     return final
                 signature = f"{call.name}:{json.dumps(call.args, sort_keys=True)[:200]}"

@@ -254,6 +254,28 @@ class ContextManager:
         self.digest = self.clip(summary, cap, tail_share=0.0)
 
 
+def readable(content) -> str:
+    """The text of a message that may also carry pictures.
+
+    Images are counted as a fixed, small cost rather than by their base64
+    length: the encoder turns one into a few hundred tokens whatever the file
+    size, and counting the data URL would reserve megabytes of budget for it.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            elif item.get("type") == "image_url":
+                parts.append(" " * 1200)      # roughly 300 tokens for an image
+        return "".join(parts)
+    return str(content or "")
+
+
 def coalesce(messages: list[dict]) -> list[dict]:
     """Merge neighbouring messages that share a role.
 

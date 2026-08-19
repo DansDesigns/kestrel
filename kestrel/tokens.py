@@ -13,6 +13,9 @@ from typing import Callable
 _DEFAULT_CPT = 3.7  # chars per token, roughly right for English + code
 
 
+IMAGE_TOKENS = 300      # what a vision encoder turns one picture into, roughly
+
+
 class TokenCounter:
     def __init__(self, tokenize: Callable[[str], int] | None = None, cache_size: int = 4096):
         self._tokenize = tokenize
@@ -63,7 +66,14 @@ class TokenCounter:
         for m in messages:
             content = m.get("content") or ""
             if isinstance(content, list):  # multimodal parts
-                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+                images = sum(1 for p in content if isinstance(p, dict)
+                             and p.get("type") == "image_url")
+                content = "".join(p.get("text", "") for p in content
+                                  if isinstance(p, dict) and p.get("type") == "text")
+                # An encoded image costs a few hundred tokens whatever the file
+                # size. Counting the base64 instead would reserve megabytes of
+                # budget and compact the conversation away to make room.
+                total += images * IMAGE_TOKENS
             total += self.count(content) + 4
             for call in m.get("tool_calls") or []:
                 fn = call.get("function", {})

@@ -278,6 +278,14 @@ order, and the model's own alternative plan was never substituted.
 Completed steps carry a green tick, and a step longer than the panel wraps onto
 as many lines as it needs rather than being cut off.
 
+Expanding anything — a trace or a picture — holds the view where it was. The
+document changes height when it is rebuilt, so the position is restored
+proportionally rather than by pixel offset; finishing at the end instead reads as
+the window jumping away, with the thing you expanded now off screen, which looks
+exactly like the click having done nothing. Navigation is refused outright too:
+QTextBrowser treats a clicked link as a document to load, and ours are commands
+rather than destinations.
+
 **Thinking blocks collapse.** Expanding one redraws the transcript from its own
 record — and a reply still streaming is not in that record, because it has not
 finished. Rather than trying to carry the live text across a rebuild, the
@@ -357,6 +365,9 @@ of XML, and stripping the tags gives the words in order, which is what a model
 needs. Where a proper library is present it is used instead. An image cannot be
 read by a text model, so what is recorded is its format and dimensions, and you
 are told so plainly rather than left wondering why it was ignored.
+
+Attached pictures show as thumbnails beside their filenames above the composer —
+a filename tells you a picture is there, a picture tells you which one.
 
 **+ beside the composer** attaches files to the next message, with the same
 readers. The text travels with the message rather than becoming a task in
@@ -737,6 +748,61 @@ byte-identical to the original.
 
 ---
 
+## 8c. A team on one model
+
+The usual way to build several agents is to give each its own model, which on a
+laptop means loading none of them. Kestrel does the opposite: one set of weights
+stays loaded and the **role** is swapped around it — briefing, conversation and
+tools. Switching costs a prompt rebuild rather than a model load, so a four-agent
+team runs on the hardware that runs one agent.
+
+The default team is Lead, Builder, Reviewer and Scribe. Deliberately few: every
+agent is another conversation to keep straight, and a team of nine on one model
+spends its time waiting rather than working. Add your own in the **Agents** tab
+with a name, a speciality and how they should behave.
+
+**Each keeps its own conversation.** That is the point of the separation — a
+reviewer that has read every keystroke of the implementation is not a reviewer,
+it is the same context wearing a different hat. Clicking a name switches who
+answers and brings up their history.
+
+Two things are shared:
+
+| | |
+|---|---|
+| **Whiteboard** | A folder in the project any agent can read and write. Work is handed over as files, which outlive the conversation and can be read by a person. |
+| **Mailboxes** | `agent_send` leaves a message delivered at the start of the recipient's next turn. Asynchronous on purpose: they share one model and take turns, so anything else would misrepresent what is happening. |
+
+**Delegation is the normal way work moves.** You talk to the Lead; it hands
+pieces out with `delegate` and waits. The specialist picks up its own
+conversation, does the work, reports back in a sentence or two, and the Lead
+reads that and decides what happens next. On one model this is a real handover
+rather than a parallel call — which is why the reply says what it did and where,
+rather than pasting the work back.
+
+Four limits keep it from becoming a machine for talking to itself:
+
+- a specialist cannot delegate onward — it would become a middle manager, and on
+  one model that is a queue with extra steps
+- four handovers per turn, then it must answer with what it has
+- delegating to yourself, or to a name that does not exist, is refused with the
+  list of who does
+- the specialist is told the task in full, because it genuinely cannot see the
+  Lead's conversation
+
+A heuristic offers an opinion when a task obviously suits someone — writing code
+to Builder, checking it to Reviewer, writing it up to Scribe — and abstains when
+it is unclear, because a confident wrong routing sends work to someone unequipped
+for it and the Lead never finds out. It is an opinion, not an instruction.
+
+Handovers appear in the transcript as they happen: `→ handing to Builder: …`
+then `← Builder: …`.
+
+Tools: `delegate`, `agent_list`, `agent_send`, `whiteboard_write`,
+`whiteboard_read`.
+
+---
+
 ## 9. Skills
 
 Kestrel implements the open [agentskills.io](https://agentskills.io/specification)
@@ -850,7 +916,12 @@ screenshot is unreadable, so one click gives the whole thing. They are shown
 whether or not the model can read them: what was attached belongs in the record
 of the conversation either way.
 
-With a projector loaded, attached images are sent as images. Without one they
+With a projector loaded, attached images are sent as images: the message becomes
+a list of parts rather than a string, which is what llama.cpp expects and what
+the composer, the worker signal, the agent and the context manager all now carry
+unchanged. An encoded image is counted as roughly 300 tokens rather than by the
+length of its base64, or a single screenshot would reserve megabytes of budget
+and compact the conversation away to make room. Without one they
 are described — dropping them silently is how a model ends up answering about a
 picture it was never shown.
 

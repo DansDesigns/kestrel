@@ -157,7 +157,8 @@ class Registry:
 
 
 def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
-                   todo_provider=None, persona_provider=None) -> Registry:
+                   todo_provider=None, persona_provider=None,
+                   roster_provider=None, delegate_fn=None) -> Registry:
     """Assemble the default toolset."""
     from . import files, shell, skillset
 
@@ -169,6 +170,9 @@ def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
     if getattr(cfg, "canvas_enabled", True):
         from . import canvas as canvastools
         canvastools.register(reg)
+    if roster_provider is not None:
+        from . import team as teamtools
+        teamtools.register(reg, roster_provider, delegate_fn)
     if todo_provider is not None and cfg.todo_enabled:
         from . import planning
         planning.register(reg, todo_provider)

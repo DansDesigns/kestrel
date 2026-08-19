@@ -66,6 +66,7 @@ def build_system(
     persona: str = "",
     has_plan_tools: bool = False,
     has_canvas: bool = False,
+    team: str = "",
 ) -> str:
     v = budget.verbosity
     parts: list[str] = []
@@ -88,6 +89,9 @@ def build_system(
     header = "Tools:" if v == 0 else "## Tools\n"
     parts.append(f"{header}\n{tool_listing}")
 
+    if team:
+        # First, because who the model is being frames everything after it.
+        parts.insert(1, team)
     if has_canvas:
         # Two lines in a tight budget, the full explanation when there is room:
         # the habit of pasting code into the reply is a strong one and a short

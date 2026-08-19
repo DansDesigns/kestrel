@@ -293,6 +293,19 @@ class ChatView(QTextBrowser):
         bar.sliderPressed.connect(lambda: setattr(self, "_user_scrolled", True))
         bar.actionTriggered.connect(lambda _a: setattr(self, "_user_scrolled", True))
 
+    def setSource(self, *args, **kwargs):  # noqa: N802
+        """Refuse navigation entirely.
+
+        QTextBrowser treats a clicked link as a document to load. Ours are
+        commands, not destinations — and a failed load leaves the view scrolled
+        somewhere else, which reads as the window jumping and the click doing
+        nothing.
+        """
+        return
+
+    def doSetSource(self, *args, **kwargs):  # noqa: N802
+        return
+
     def _anchor_clicked(self, url) -> None:
         text = url.toString()
         if not text.startswith("kestrel:"):
@@ -308,7 +321,7 @@ class ChatView(QTextBrowser):
             if self.streaming():
                 self._pending_toggle = True
             else:
-                self.rerender()
+                self.rerender(keep_position=True)
             return
         self.actionRequested.emit(action, number)
 
@@ -588,7 +601,7 @@ class ChatView(QTextBrowser):
         if self.streaming() or self._thought_anchor is not None:
             self._pending_toggle = True
             return
-        self.rerender()
+        self.rerender(keep_position=True)
 
     def finish_turn(self) -> None:
         """Close out any open region, then apply a toggle that was waiting.
@@ -713,16 +726,24 @@ class ChatView(QTextBrowser):
                                  md_to_html(final) + self._actions_html(self._reply_no),
                                  theme.AMBER, theme.BUBBLE_AI))
 
-    def rerender(self) -> None:
+    def rerender(self, keep_position: bool = False) -> None:
         """Rebuild the transcript in the current palette.
 
         Refused while a reply is streaming: the live text is not in the record
         being replayed, so rebuilding would delete it mid-sentence while tokens
         are still arriving.
+
+        `keep_position` holds the view where it was. Expanding something you
+        clicked halfway up the transcript should leave it under the pointer;
+        finishing at the end instead reads as the window jumping away, and the
+        thing you expanded is then off screen — which looks exactly like the
+        expansion not having worked.
         """
         if self.streaming() or self._thought_anchor is not None:
             self._pending_toggle = True
             return
+        bar = self.verticalScrollBar()
+        anchor_ratio = (bar.value() / bar.maximum()) if bar.maximum() else 1.0
         entries = list(self._log)
         self._replaying = True
         try:
@@ -739,7 +760,13 @@ class ChatView(QTextBrowser):
         finally:
             self._replaying = False
             self._log = entries
-        self._end()
+        if keep_position:
+            # Proportional rather than absolute: the document has just changed
+            # height, so the old pixel offset means nothing.
+            bar = self.verticalScrollBar()
+            bar.setValue(int(bar.maximum() * anchor_ratio))
+        else:
+            self._end()
 
     def clear_log(self) -> None:
         self._log.clear()

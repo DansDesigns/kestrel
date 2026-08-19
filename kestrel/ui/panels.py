@@ -2636,3 +2636,152 @@ class CanvasPanel(QWidget):
         self.user_surface.filename.setText(item.name)
         self.tabs.setCurrentWidget(self.user_surface)
         self.statusLine.emit(f"Loaded {item.label}")
+
+
+# ================================================================= agents ===
+class AgentsPanel(QWidget):
+    """The team, and which of them you are talking to.
+
+    One model is loaded; the role is swapped around it. Clicking a name changes
+    who answers, and brings up that agent's own conversation — which is the
+    point of keeping them apart. A reviewer that has read every keystroke of the
+    implementation is not a reviewer.
+    """
+
+    statusLine = Signal(str)
+    agentChosen = Signal(str)
+    rosterEdited = Signal()
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.roster = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setSpacing(6)
+
+        blurb = QLabel("One model, several roles. Clicking a name switches who "
+                       "answers and shows their conversation.")
+        blurb.setWordWrap(True)
+        blurb.setObjectName("Dim")
+        lay.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["", "Agent", "Doing"])
+        self.tree.setObjectName("Flush")
+        self.tree.setRootIsDecorated(False)
+        self.tree.setUniformRowHeights(False)
+        self.tree.setWordWrap(True)
+        self.tree.setItemDelegateForColumn(2, WrappingDelegate(self.tree))
+        stretch_columns(self.tree, first_stretch=1, fixed={0: 22})
+        self.tree.itemDoubleClicked.connect(lambda *_: self.switch())
+        self.tree.currentItemChanged.connect(lambda *_: self._show())
+        lay.addWidget(self.tree, 1)
+
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("Dim")
+        lay.addWidget(self.detail)
+
+        row = QHBoxLayout()
+        for text, slot, tip in (("Talk to", self.switch, "Switch the chat to this agent"),
+                                ("New…", self.add, "Add a role to the team"),
+                                ("Remove", self.remove, "Take a role off the team")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        lay.addLayout(row)
+
+        board = QPushButton("Open the whiteboard")
+        board.setToolTip("The folder the agents hand work over in")
+        board.clicked.connect(self.open_whiteboard)
+        lay.addWidget(board)
+
+    # -- state ---------------------------------------------------------------
+    def set_roster(self, roster) -> None:
+        self.roster = roster
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.tree.clear()
+        if self.roster is None:
+            self.detail.setText("The team is not available yet.")
+            return
+        colours = {"working": theme.AMBER, "waiting": theme.SIGNAL,
+                   "blocked": theme.ALERT}
+        for agent in self.roster.agents:
+            here = agent.name == self.roster.active
+            mark = "▸" if here else ("✉" if agent.unread else "")
+            doing = agent.activity or agent.status
+            item = QTreeWidgetItem([mark, agent.name, doing])
+            item.setData(0, Qt.UserRole, agent.name)
+            item.setToolTip(1, agent.speciality)
+            colour = colours.get(agent.status)
+            if here:
+                item.setForeground(1, QColor(theme.AMBER))
+            elif colour:
+                item.setForeground(2, QColor(colour))
+            self.tree.addTopLevelItem(item)
+            if here:
+                self.tree.setCurrentItem(item)
+        self.tree.scheduleDelayedItemsLayout()
+        self._show()
+
+    def _selected(self):
+        item = self.tree.currentItem()
+        if item is None or self.roster is None:
+            return None
+        return self.roster.get(item.data(0, Qt.UserRole))
+
+    def _show(self) -> None:
+        agent = self._selected()
+        if agent is None:
+            self.detail.setText("")
+            return
+        self.detail.setText(f"{agent.name} — {agent.summary()}\n{agent.speciality}")
+
+    # -- actions -------------------------------------------------------------
+    def switch(self) -> None:
+        agent = self._selected()
+        if agent is None:
+            return
+        self.agentChosen.emit(agent.name)
+
+    def add(self) -> None:
+        name, ok = QInputDialog.getText(self, "New agent", "Name:")
+        if not ok or not name.strip():
+            return
+        speciality, _ = QInputDialog.getText(self, "New agent",
+                                             f"What is {name.strip()} for?")
+        voice, _ = QInputDialog.getMultiLineText(
+            self, "New agent", "How should they behave? (optional)")
+        if self.roster is not None:
+            self.roster.add(name, speciality or "", voice or "")
+            self.rosterEdited.emit()
+            self.refresh()
+            self.statusLine.emit(f"Added {name.strip()}")
+
+    def remove(self) -> None:
+        agent = self._selected()
+        if agent is None or self.roster is None:
+            return
+        if len(self.roster.agents) <= 1:
+            self.statusLine.emit("A team of none is just a model.")
+            return
+        if QMessageBox.question(
+                self, "Remove agent",
+                f"Remove {agent.name}? Their conversation goes with them.") \
+                != QMessageBox.Yes:
+            return
+        self.roster.remove(agent.name)
+        self.rosterEdited.emit()
+        self.refresh()
+
+    def open_whiteboard(self) -> None:
+        if self.roster is None:
+            return
+        folder = self.roster.ensure_whiteboard()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
