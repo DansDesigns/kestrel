@@ -95,8 +95,12 @@ def check(timeout: float = 12.0) -> Result:
     last_error = ""
     for branch in BRANCHES:
         try:
+            # Raw GitHub caches for five minutes, and a stale answer here
+            # looks exactly like being up to date.
             response = requests.get(RAW.format(repo=REPO, branch=branch),
-                                    timeout=timeout)
+                                    timeout=timeout,
+                                    headers={"Cache-Control": "no-cache",
+                                             "Pragma": "no-cache"})
         except Exception as e:
             last_error = str(e)
             continue
@@ -111,7 +115,13 @@ def check(timeout: float = 12.0) -> Result:
             last_error = "version.txt is empty"
             continue
         result.remote = text[0].strip()
-        result.available = compare(result.local, result.remote) < 0
+        order = compare(result.local, result.remote)
+        # A tie between two versions that are written differently is not a tie:
+        # it means the comparison could not read one of them. Offering the
+        # update is the safe way to be wrong — refusing it strands the machine,
+        # which is exactly what a parser that could not read "1.0" did.
+        result.available = order < 0 or (
+            order == 0 and result.local.strip() != result.remote.strip())
         return result
     result.error = last_error or "no response"
     return result

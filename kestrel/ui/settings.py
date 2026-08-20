@@ -448,11 +448,19 @@ class SettingsDialog(QDialog):
         check.clicked.connect(self.check_updates)
         lay.addWidget(check)
 
+        self.reinstall_btn = QPushButton("Reinstall the published version")
+        self.reinstall_btn.setToolTip(
+            "Fetch and install whatever is published, whatever the version "
+            "numbers say. For when a comparison is wrong rather than a version "
+            "being old.")
+        self.reinstall_btn.clicked.connect(self.force_install)
+
         self.install_btn = QPushButton("Install the update")
         self.install_btn.setObjectName("Primary")
         self.install_btn.clicked.connect(self.install_update)
         self.install_btn.hide()
         lay.addWidget(self.install_btn)
+        lay.addWidget(self.reinstall_btn)
 
         self.update_log = QPlainTextEdit()
         self.update_log.setReadOnly(True)
@@ -496,7 +504,21 @@ class SettingsDialog(QDialog):
                 "Install the update" + ("  (git pull)" if update.is_git_checkout()
                                         else ""))
 
-    def install_update(self) -> None:
+    def force_install(self) -> None:
+        """Install regardless of what the comparison decided.
+
+        A machine whose version comparison is broken cannot be fixed by an
+        update it will not offer itself. This is the way out of that, and the
+        reason it exists at all.
+        """
+        if QMessageBox.question(
+                self, "Reinstall",
+                "Fetch and install the published version, whatever the version "
+                "numbers say?") != QMessageBox.Yes:
+            return
+        self.install_update(force=True)
+
+    def install_update(self, force: bool = False) -> None:
         if QMessageBox.question(
                 self, "Install the update",
                 "Replace this installation with the published version?\n\n"

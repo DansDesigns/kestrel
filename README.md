@@ -1895,7 +1895,15 @@ finds it useful enough to put something back.
 
 **Settings → Updates** compares the version published at
 `github.com/dansdesigns/kestrel/version.txt` with the one installed and reports
-the difference. Versions are compared as numbers with as many parts as they have: `1.0` is
+the difference. **A tie between two versions written differently is not a tie** — it means the
+comparison could not read one of them, and the update is offered anyway.
+Offering redundantly is the safe way to be wrong; refusing strands the machine.
+
+**Reinstall the published version** in Settings → Updates installs whatever is
+published regardless of the numbers. It exists because a machine whose version
+comparison is broken cannot be fixed by an update it will not offer itself.
+
+Versions are compared as numbers with as many parts as they have: `1.0` is
 `1.0.0`, `1.10` is above `1.2`, and a leading `v` is ignored. Requiring exactly
 three parts meant `1.0` and `0.15` both failed to parse and fell back to zero —
 so every comparison between them was a tie, and a two-part version could be
