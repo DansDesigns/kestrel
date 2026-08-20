@@ -426,3 +426,59 @@ def batch_that_fits(info: "GGUFInfo", spare_mb: int, want: int = 2048) -> int:
         if size <= fits and size <= want:
             return size
     return 64
+
+
+COMPARE_FIELDS = (
+    ("architecture", "architecture"),
+    ("quant", "quantisation"),
+    ("size_gb", "file size"),
+    ("n_layer", "layers"),
+    ("n_embd", "embedding width"),
+    ("n_head", "attention heads"),
+    ("n_head_kv", "key/value heads"),
+    ("vocab", "vocabulary"),
+    ("n_ctx_train", "trained context"),
+    ("tools", "tool calling"),
+    ("vision", "reads images"),
+)
+
+
+def compare(a: "GGUFInfo", b: "GGUFInfo") -> list[tuple[str, str, str]]:
+    """What differs between two models, as (label, a, b).
+
+    The question worth answering when one model loads and another of the same
+    family and size does not. The answer is usually a single field — a wider
+    vocabulary, twice the layers, a quantisation that is not what the filename
+    claims — and it is invisible until the two are put side by side.
+    """
+    rows = []
+    for attr, label in COMPARE_FIELDS:
+        left, right = getattr(a, attr, None), getattr(b, attr, None)
+        if left == right:
+            continue
+        # Sizes differing in the third decimal are the same size to anyone
+        # reading, and listing them buries the difference that matters.
+        if isinstance(left, float) and isinstance(right, float):
+            if abs(left - right) < 0.05:
+                continue
+        def show(value):
+            if isinstance(value, bool):
+                return "yes" if value else "no"
+            if isinstance(value, float):
+                return f"{value:.1f} GB"
+            if isinstance(value, int) and value > 9999:
+                return f"{value:,}"
+            return str(value if value not in (None, "") else "—")
+        rows.append((label, show(left), show(right)))
+    return rows
+
+
+def differences(a: "GGUFInfo", b: "GGUFInfo") -> str:
+    rows = compare(a, b)
+    if not rows:
+        return "Nothing differs in the metadata of these two."
+    width = max(len(label) for label, _l, _r in rows)
+    lines = [f"{'':<{width}}   {Path(a.path).name[:28]:<28}   {Path(b.path).name[:28]}"]
+    for label, left, right in rows:
+        lines.append(f"{label:<{width}}   {left:<28}   {right}")
+    return "\n".join(lines)

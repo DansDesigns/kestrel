@@ -994,6 +994,17 @@ and compact the conversation away to make room. Without one they
 are described — dropping them silently is how a model ends up answering about a
 picture it was never shown.
 
+### 10.2a Comparing two models
+
+When one model of a family loads and another does not, the answer is almost
+always a single field — a wider vocabulary, twice the layers, a quantisation
+that is not what the filename claims — and it is invisible until the two are put
+side by side. **Compare with loaded** in the Models tab does that against
+whichever model last started successfully, and a failed load adds the same
+comparison to the error.
+
+---
+
 ### 10.2b Why two models of the same size behave differently
 
 **The vocabulary matters as much as the weights.** llama.cpp allocates an output

@@ -1151,6 +1151,30 @@ class MainWindow(QWidget):
 
     @Slot(str)
     @Slot(int, int)
+    def _comparison_hint(self, path: str) -> str:
+        """How this model differs from the last one that loaded.
+
+        When one model of a family loads and another does not, the answer is
+        almost always a single field — a wider vocabulary, twice the layers, a
+        quantisation that is not what the filename says. Invisible until the
+        two are put side by side.
+        """
+        good = getattr(self.cfg, "last_good_model", "")
+        if not good or not path or Path(good) == Path(path):
+            return ""
+        try:
+            from .. import gguf as ggufmod
+            a = ggufmod.read(good, want_template=False)
+            b = ggufmod.read(path, want_template=False)
+        except Exception:
+            return ""
+        rows = ggufmod.compare(a, b)
+        if not rows:
+            return ""
+        lines = "\n".join(f"  {label}: {left} → {right}"
+                          for label, left, right in rows[:6])
+        return (f"\n\nAgainst {Path(good).name}, which loaded here:\n{lines}")
+
     def _compute_buffer_hint(self) -> str:
         """Advice that depends on what has already been tried.
 
@@ -2167,6 +2191,8 @@ class MainWindow(QWidget):
                     self.chat.add_note(LAST_CAP[-1] + ".", theme.AMBER)
                     LAST_CAP.clear()
                 self.remember_profile(path)
+                self.cfg.last_good_model = str(path)
+                self.cfg.save()
                 self.statusReady.emit(f"Loaded {Path(path).name}")
                 self.requestPrepare.emit()
             else:
@@ -2205,7 +2231,8 @@ class MainWindow(QWidget):
                     "itself on the next attempt.")
         elif clustermod.compute_buffer_failure(summary):
             rt = self.cfg.runtime
-            hint = self._compute_buffer_hint()
+            hint = self._compute_buffer_hint() + self._comparison_hint(
+                getattr(self, "_loading_path", ""))
         elif "unknown command" in summary:
             hint = ("\n\nThat message comes from the unified `llama` binary, which "
                     "expects a subcommand. Kestrel calls `llama serve` for it — if "

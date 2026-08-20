@@ -191,6 +191,12 @@ class ModelsPanel(UiThread, QWidget):
         self.tree.itemDoubleClicked.connect(lambda *_: self.load_selected())
         lay.addWidget(self.tree, 2)
 
+        self.compare_btn = QPushButton("Compare with loaded")
+        self.compare_btn.setToolTip("What differs between this model and the "
+                                    "one that last loaded")
+        self.compare_btn.clicked.connect(self.compare_with_loaded)
+        lay.addWidget(self.compare_btn)
+
         self.detail_btn = QPushButton("Details")
         self.detail_btn.setCheckable(True)
         self.detail_btn.setToolTip("Show what is inside the selected model")
@@ -297,6 +303,25 @@ class ModelsPanel(UiThread, QWidget):
             return None
         path = item.data(0, Qt.UserRole)
         return next((e for e in self.catalog.entries if str(e.path) == path), None)
+
+    def compare_with_loaded(self) -> None:
+        entry = self._entry_for(self.tree.currentItem())
+        good = getattr(self.cfg, "last_good_model", "")
+        if entry is None:
+            self.statusLine.emit("Choose a model first")
+            return
+        if not good:
+            self.statusLine.emit("Nothing has loaded yet to compare against")
+            return
+        from ..gguf import read as read_gguf, differences
+        try:
+            other = read_gguf(good, want_template=False)
+        except Exception as e:
+            self.statusLine.emit(f"Could not read {Path(good).name}: {e}")
+            return
+        self.detail.setPlainText(differences(other, entry.info))
+        self.detail_btn.setChecked(True)
+        self.detail.show()
 
     def _toggle_detail(self, shown: bool) -> None:
         self.detail.setVisible(shown and bool(self.detail.toPlainText().strip()))

@@ -147,6 +147,7 @@ class Config:
     # of the model and the machine, not of the session, so it is remembered
     # rather than rediscovered by failing again.
     model_profiles: dict = field(default_factory=dict)
+    last_good_model: str = ""         # the last one that loaded, for comparison
     model_vision: bool = False        # the loaded model accepts images
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""
