@@ -17,7 +17,7 @@ RAW = "https://raw.githubusercontent.com/{repo}/{branch}/version.txt"
 BRANCHES = ("main", "master")
 RELEASES = f"https://github.com/{REPO}"
 
-VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+VERSION_RE = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[.\-+]([0-9A-Za-z.]+))?")
 
 
 def local_version() -> str:
@@ -40,8 +40,20 @@ def local_version() -> str:
 
 
 def parse(version: str) -> tuple[int, ...]:
+    """A version as numbers, however many parts it has.
+
+    Requiring three of them meant "1.0" and "0.15" both failed to match and
+    fell back to zero, so every comparison between them was a tie — and a
+    two-part version could be reported as ahead of a newer one. Missing parts
+    count as zero, which is what everyone means by 1.0 being 1.0.0.
+    """
     match = VERSION_RE.search(str(version or ""))
-    return tuple(int(p) for p in match.groups()) if match else (0, 0, 0)
+    if not match:
+        return (0, 0, 0)
+    parts = [int(p) if p and p.isdigit() else 0 for p in match.groups()[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
 
 
 def compare(local: str, remote: str) -> int:

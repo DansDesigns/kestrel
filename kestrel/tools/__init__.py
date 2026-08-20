@@ -111,7 +111,30 @@ class Registry:
         return [t.schema() for t in self.tools.values()]
 
     def listing(self, verbosity: int) -> str:
+        """The tools, at whatever length there is room for.
+
+        At the tightest budget only the names appear, with tool_help to fetch a
+        signature. A model cannot call a tool it has not been told exists — a
+        folder path would not do, because it would need a tool to look in the
+        folder — but it does not need every parameter of every tool in front of
+        it to know what is available.
+        """
+        if verbosity <= 0:
+            names = ", ".join(self.tools)
+            return (names + "\n\nCall tool_help(name) for a tool's arguments "
+                    "before using it for the first time.")
         return "\n".join(t.line(verbosity) for t in self.tools.values())
+
+    def help_for(self, name: str) -> str:
+        tool = self.tools.get(str(name or "").strip())
+        if tool is None:
+            close = [n for n in self.tools if str(name)[:4] in n]
+            return (f"There is no tool called {name}."
+                    + (f" Did you mean: {', '.join(close)}?" if close else ""))
+        text = tool.line(3)
+        if getattr(tool, "detail", ""):
+            text += "\n" + tool.detail
+        return text
 
     def needs_approval(self, tool: Tool) -> bool:
         if self.approval_mode == "never":
@@ -171,6 +194,14 @@ def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
 
     ws = cfg.workspace_path()
     reg = Registry(ws, approver=approver, approval_mode=cfg.approval)
+    def tool_help(name: str) -> ToolResult:
+        return ToolResult(reg.help_for(name))
+
+    reg.add(Tool("tool_help", "What arguments a tool takes.",
+                 [Param("name", "string", "The tool's name.", required=True)],
+                 tool_help, DANGER_SAFE,
+                 detail="Only the names are listed when the context is small. "
+                        "Read a tool's arguments here before calling it."))
     files.register(reg, ws)
     shell.register(reg, ws)
     skillset.register(reg, skills_provider)

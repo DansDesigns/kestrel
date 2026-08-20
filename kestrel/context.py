@@ -126,6 +126,7 @@ class ContextManager:
         self.summarizer = summarizer
         self.digest = ""            # rolling summary of dropped turns
         self.compactions = 0
+        self.clipped_system = 0
         self.usage = Usage(n_ctx=budget.n_ctx)
 
     def set_budget(self, budget: Budget) -> None:
@@ -161,8 +162,16 @@ class ContextManager:
         """Return the message list to send, compacting history in place if needed."""
         sys_tokens = self.counter.count(system) + 4
         if sys_tokens > self.budget.system:
+            # Cutting the system prompt truncates the tool listing mid-entry,
+            # and a model handed half an instruction produces half an answer or
+            # none. It still has to fit, but it must not happen quietly: the
+            # symptom is "the model returned nothing usable", which looks like
+            # a broken model rather than a prompt cut in two.
+            self.clipped_system = sys_tokens - self.budget.system
             system = self.clip(system, self.budget.system, tail_share=0.0)
             sys_tokens = self.counter.count(system) + 4
+        else:
+            self.clipped_system = 0
 
         allowance = self.budget.history
         if plan:

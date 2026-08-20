@@ -392,6 +392,7 @@ class ModelsPanel(UiThread, QWidget):
 # =========================================================== params panel ===
 class ParamsPanel(QWidget):
     resetRuntime = Signal()
+    safeLoad = Signal()
     """Everything adjustable, in one place.
 
     Settings used to be split between a dialog and the side panels, which meant
@@ -471,6 +472,13 @@ class ParamsPanel(QWidget):
         self.rt_ngl.setValue(rt.n_gpu_layers)
         self.rt_ngl.valueChanged.connect(
             lambda v: self.split.set_value(v) if v >= 0 else None)
+        safe = QPushButton("Try the safest load")
+        safe.setToolTip("CPU only, smallest batch, short context, no flash "
+                        "attention — a baseline that tells you whether the "
+                        "model itself is sound")
+        safe.clicked.connect(self.safeLoad.emit)
+        lay.addWidget(safe)
+
         reset = QPushButton("Reset to defaults")
         reset.setToolTip("Undo the settings the recovery ladder changed to make "
                          "a model fit — an 8-bit cache and a reduced offload "

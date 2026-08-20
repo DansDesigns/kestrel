@@ -886,6 +886,15 @@ class Agent:
             self.emit("context", {"usage": self.ctx.usage, "budget": self.budget,
                                   "compactions": self.ctx.compactions, "step": step})
             self._handover_if_compacted()
+            if getattr(self.ctx, "clipped_system", 0):
+                over = self.ctx.clipped_system
+                self.emit("error", {"message":
+                    f"The system prompt is {over} tokens larger than this "
+                    f"context allows, so it was cut — which truncates the tool "
+                    "list and usually produces an empty or nonsense reply. "
+                    "Load a model with a larger context, or turn off the team "
+                    "in Settings → Agent to shed its tools."})
+                self.ctx.clipped_system = 0
             if self.todo:
                 self.emit("todo", {"todo": self.todo})
 

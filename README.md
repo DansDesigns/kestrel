@@ -855,6 +855,23 @@ Tools: `delegate`, `agent_list`, `agent_send`, `whiteboard_write`,
 
 ---
 
+### 8d. The tool listing shrinks with the window
+
+A model cannot call a tool it has not been told exists — a folder path would not
+do, because it would need a tool to look in the folder. But it does not need
+every parameter of every tool in front of it. At the tightest budget only the
+names are listed and `tool_help(name)` fetches the arguments, which takes the
+listing from 346 tokens to 86.
+
+That matters more than it sounds. The system prompt has an allowance, and when
+it exceeds it the prompt is cut — truncating the tool list mid-entry and leaving
+the model with half an instruction. The reply is then empty or nonsense, which
+looks like a broken model rather than a prompt cut in two. Kestrel now says so
+when it happens, and with names-only listing a 28-tool build fits a 4,096-token
+context with room to spare.
+
+---
+
 ## 9. Skills
 
 Kestrel implements the open [agentskills.io](https://agentskills.io/specification)
@@ -1867,7 +1884,13 @@ finds it useful enough to put something back.
 
 **Settings → Updates** compares the version published at
 `github.com/dansdesigns/kestrel/version.txt` with the one installed and reports
-the difference. The installed version is read from `version.txt` when there is one — that file
+the difference. Versions are compared as numbers with as many parts as they have: `1.0` is
+`1.0.0`, `1.10` is above `1.2`, and a leading `v` is ignored. Requiring exactly
+three parts meant `1.0` and `0.15` both failed to parse and fell back to zero —
+so every comparison between them was a tie, and a two-part version could be
+reported as ahead of a newer one.
+
+The installed version is read from `version.txt` when there is one — that file
 belongs to whoever maintains the checkout, and Kestrel only ever reports it,
 never writes it. Without one it falls back to the package constant.
 

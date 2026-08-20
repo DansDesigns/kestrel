@@ -1212,6 +1212,39 @@ class MainWindow(QWidget):
                 seen.append(label)
         return ", ".join(seen)
 
+    def safe_load(self) -> None:
+        """Load with the least that can possibly work.
+
+        Everything off: no GPU, the smallest batch, a short context, no flash
+        attention, no quantised cache. This is not a setting to run with — it
+        is a question. If a model loads this way, the fault is in what was
+        switched on, and the settings can be walked back up. If it does not,
+        the fault is in the model file or the llama.cpp build, and no amount of
+        tuning will reach it.
+        """
+        if not self.cfg.model_path:
+            self._status("Choose a model first")
+            return
+        rt = self.cfg.runtime
+        rt.n_gpu_layers = 0
+        rt.batch_size, rt.ubatch_size = 128, 32
+        rt.ctx_size = 2048
+        rt.flash_attn = "off"
+        rt.cache_type_k = rt.cache_type_v = "f16"
+        rt.no_kv_offload = False
+        rt.cpu_moe = False
+        rt.recovered = ["n_gpu_layers", "batch_size", "ubatch_size", "ctx_size",
+                        "flash_attn"]
+        self.cfg.save()
+        self._ngl_retries = 99          # no ladder: this is already the bottom
+        self.chat.add_note(
+            "Loading on the CPU alone, batch 128/32, context 2,048, flash "
+            "attention off. If this works the model is fine and something that "
+            "was switched on is not; if it fails, the model file or the "
+            "llama.cpp build is at fault.", theme.AMBER)
+        self._with("params_panel", lambda p: p.refresh_preview())
+        self.load_model(self.cfg.model_path)
+
     def reset_runtime(self) -> None:
         """Put the load-time settings back to their defaults."""
         from ..runtime import Runtime
@@ -1402,6 +1435,7 @@ class MainWindow(QWidget):
 
     def _wire_params(self, p) -> None:
         p.resetRuntime.connect(self.reset_runtime)
+        p.safeLoad.connect(self.safe_load)
         self.params_panel = p
         p.statusLine.connect(self._status)
         p.appearanceChanged.connect(self.apply_appearance)
