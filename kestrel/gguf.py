@@ -56,6 +56,7 @@ class GGUFInfo:
     n_head: int = 0
     n_head_kv: int = 0          # fewer than n_head under grouped-query attention
     head_dim: int = 0
+    vocab: int = 0
     n_params: int = 0
     tensor_count: int = 0
     file_size: int = 0
@@ -206,6 +207,10 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
         return info
 
     info.kv = {k: v for k, v in kv.items() if k != "tokenizer.chat_template"}
+    if not info.vocab:
+        tokens = kv.get("tokenizer.ggml.tokens")
+        if isinstance(tokens, list):
+            info.vocab = len(tokens)
     detect_vision(info, kv)
     arch = str(kv.get("general.architecture") or "")
     info.architecture = arch
@@ -231,7 +236,8 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
                       (f"{arch}.embedding_length", "n_embd"),
                       (f"{arch}.attention.head_count", "n_head"),
                       (f"{arch}.attention.head_count_kv", "n_head_kv"),
-                      (f"{arch}.attention.key_length", "head_dim")):
+                      (f"{arch}.attention.key_length", "head_dim"),
+                      (f"{arch}.vocab_size", "vocab")):
         v = kv.get(key)
         if isinstance(v, int):
             setattr(info, attr, v)
@@ -395,3 +401,28 @@ def detect_vision(info: "GGUFInfo", meta: dict | None = None) -> None:
             # principle but not as installed, which is worth saying plainly.
             info.projector = ""
             info.vision = True
+
+
+def logits_buffer_mb(info: "GGUFInfo", batch: int) -> int:
+    """Memory llama.cpp needs for the output logits of one batch.
+
+    Batch times vocabulary times four bytes. It is easy to overlook because it
+    has nothing to do with the model's size: Gemma's 262k vocabulary needs
+    twice what Qwen's 152k does for identical weights, which is why two models
+    of the same gigabytes behave differently at the same batch size.
+    """
+    if not info.vocab or batch <= 0:
+        return 0
+    return int(batch * info.vocab * 4 / (1024 ** 2))
+
+
+def batch_that_fits(info: "GGUFInfo", spare_mb: int, want: int = 2048) -> int:
+    """The largest batch whose logits buffer fits in `spare_mb`."""
+    if not info.vocab or spare_mb <= 0:
+        return want
+    per_token = info.vocab * 4 / (1024 ** 2)
+    fits = int(spare_mb / per_token) if per_token else want
+    for size in (2048, 1024, 512, 256, 128, 64):
+        if size <= fits and size <= want:
+            return size
+    return 64

@@ -34,7 +34,7 @@ from ..config import Config, Node
 from ..llm import LlamaClient, LLMError
 from . import theme
 from .panels import (AgentsPanel, BackendPanel, CanvasPanel, MemoryPanel,
-                     ModelsPanel, ParamsPanel,
+                     ModelsPanel, ParamsPanel, PromptPanel,
                      PersonaPanel, PlanPanel, ProjectsPanel, SpeechPanel,
                      SystemPanel, ToolsPanel, UiThread, _row)
 from .downloads_window import DownloadsWindow
@@ -686,6 +686,9 @@ class MainWindow(QWidget):
         self.backend_panel = self.system_panel = self.tools_panel = None
         self.canvas_panel = None
         self.agents_panel = None
+        self._persona_window = None
+        self.prompt_panel = None
+        self._last_prompt = ""
         self._tool_list: list[dict] = []
         self._gen_start = None
         self._gen_last = 0.0
@@ -765,9 +768,10 @@ class MainWindow(QWidget):
         # Vertical icon rail: nine horizontal tabs never fitted a narrow panel,
         # and elided text ("S...", "M...") named nothing. Icons plus tooltips
         # stay legible at any width.
-        self._icon_tabs = ["status", "models", "params", "persona", "agents",
-                           "cluster", "tools", "skills", "memory", "speech",
-                           "backend"]
+        # Persona is no longer a tab of its own: a character belongs to whoever
+        # is wearing it, so it is chosen per agent instead.
+        self._icon_tabs = ["status", "models", "params", "agents", "cluster",
+                           "tools", "skills", "memory", "speech", "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -785,8 +789,6 @@ class MainWindow(QWidget):
                     "Models")
         left.addTab(self._lazy(lambda: ParamsPanel(self.cfg), self._wire_params),
                     "Params")
-        left.addTab(self._lazy(lambda: PersonaPanel(self.cfg), self._wire_persona),
-                    "Persona")
         left.addTab(self._lazy(lambda: AgentsPanel(self.cfg), self._wire_agents),
                     "Agents")
 
@@ -851,6 +853,9 @@ class MainWindow(QWidget):
         self.attach_row.addWidget(self.attach_bar, 1)
         self.attach_strip.hide()
         clay.addWidget(self.attach_strip)
+        self.input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.input.document().documentLayout().documentSizeChanged.connect(
+            lambda *_: self._fit_input())
         clay.addWidget(self.input)
 
         # Only the two actions that belong to the message itself stay here; the
@@ -917,8 +922,8 @@ class MainWindow(QWidget):
         right = QTabWidget()
         # The right column is what the work produces: the project it belongs
         # to, the code being written, the plan, and the machinery underneath.
-        self._right_tabs = ["projects", "canvas", "plan", "activity", "log",
-                            "monitor"]
+        self._right_tabs = ["projects", "canvas", "plan", "prompt", "activity",
+                            "log", "monitor"]
         right.setTabBar(IconTabBar(self._right_tabs))
         right.setTabPosition(QTabWidget.East)
         right.addTab(self.projects_panel, "Projects")
@@ -926,6 +931,8 @@ class MainWindow(QWidget):
                      "Canvas")
         self.plan_panel = PlanPanel()
         right.addTab(self.plan_panel, "Plan")
+        right.addTab(self._lazy(lambda: PromptPanel(self.cfg), self._wire_prompt),
+                     "Prompt")
         right.addTab(self.activity, "Activity")
         right.addTab(self.log, "Server log")
         right.addTab(self._lazy(SystemPanel, self._wire_system), "System")
@@ -1054,6 +1061,23 @@ class MainWindow(QWidget):
         self._with("speech_panel", lambda p: p.refresh())
         self._status(f"{theme.current.capitalize()} palette")
 
+    INPUT_MAX_LINES = 8
+
+    def _fit_input(self) -> None:
+        """Grow the composer with its text, up to a point, then scroll.
+
+        One line to start with: a box that opens four lines tall implies a
+        paragraph is wanted, when most messages are a sentence. Past eight it is
+        a document rather than a message, and taking the window for it would
+        push away the conversation being replied to.
+        """
+        doc = self.input.document()
+        metrics = self.input.fontMetrics()
+        wrapped = int(doc.size().height()) or 1
+        lines_needed = max(1, min(self.INPUT_MAX_LINES, max(doc.blockCount(), wrapped)))
+        frame = self.input.frameWidth() * 2 + 12
+        self.input.setFixedHeight(int(lines_needed * metrics.lineSpacing()) + frame)
+
     @Slot(bool)
     def _follow_changed(self, following: bool) -> None:
         self.follow_btn.blockSignals(True)
@@ -1127,6 +1151,83 @@ class MainWindow(QWidget):
 
     @Slot(str)
     @Slot(int, int)
+    def _compute_buffer_hint(self) -> str:
+        """Advice that depends on what has already been tried.
+
+        Telling someone to lower a batch they have already lowered is worse
+        than saying nothing: it reads as though the message was written without
+        looking, and the next thing they change will be the wrong one.
+        """
+        rt = self.cfg.runtime
+        batch = rt.batch_size or 2048
+        ubatch = rt.ubatch_size or 512
+        head = ("\n\nThis is the compute buffer, not the weights or the KV "
+                "cache. It is sized by the batch and by how much of the model "
+                "is on the GPU.")
+        if batch > 256:
+            return head + (f"\n\nBatch is {batch} with a micro-batch of "
+                           f"{ubatch}. Try 512 and 128 under Params → Runtime; "
+                           "it costs prompt-processing speed and nothing else.")
+        layers = rt.n_gpu_layers
+        if layers != 0:
+            where = "auto" if layers < 0 else str(layers)
+            return head + (
+                f"\n\nThe batch is already {batch}/{ubatch}, so the buffer is "
+                "small and the room is going elsewhere. GPU layers are "
+                f"currently {where}: the weights have taken the budget and left "
+                "nothing to build the buffer in. Lower the GPU layers — on "
+                "integrated graphics they share the same RAM, so a layer moved "
+                "back to the CPU costs the compute units and no bandwidth."
+                f"\n\nContext is {rt.ctx_size:,}; halving it frees the cache "
+                "as well.")
+        return head + (
+            f"\n\nBatch is {batch}/{ubatch} and nothing is on the GPU, so this "
+            f"is the context: {rt.ctx_size:,} tokens. Halve it, or use a "
+            "smaller quantisation.")
+
+    def recovery_warning(self) -> str:
+        """What recovery left switched on, in words.
+
+        These settings are the difference between a model that runs and one
+        that does not, so they stay — but an 8-bit cache or an offload of zero
+        also costs quality or speed, and nobody would guess a week later that
+        they were still on.
+        """
+        rt = self.cfg.runtime
+        if not rt.recovered:
+            return ""
+        names = {"no_kv_offload": "KV cache in system RAM",
+                 "cpu_moe": "experts on the CPU",
+                 "cache_type_k": "8-bit KV cache",
+                 "cache_type_v": "8-bit KV cache",
+                 "flash_attn": "flash attention off",
+                 "n_gpu_layers": f"GPU offload at {rt.n_gpu_layers}",
+                 "batch_size": f"batch {rt.batch_size}",
+                 "ubatch_size": f"micro-batch {rt.ubatch_size}",
+                 "ctx_size": f"context {rt.ctx_size:,}"}
+        seen = []
+        for key in rt.recovered:
+            label = names.get(key)
+            if label and label not in seen:
+                seen.append(label)
+        return ", ".join(seen)
+
+    def reset_runtime(self) -> None:
+        """Put the load-time settings back to their defaults."""
+        from ..runtime import Runtime
+        fresh = Runtime()
+        rt = self.cfg.runtime
+        for key in list(rt.recovered):
+            if hasattr(fresh, key):
+                setattr(rt, key, getattr(fresh, key))
+        rt.recovered = []
+        self.cfg.save()
+        self._with("params_panel", lambda p: p.refresh_preview())
+        self._status("Load-time settings back to their defaults — reload the "
+                     "model to apply them")
+        self.chat.add_note("Runtime settings reset. Reload the model for it to "
+                           "take effect.", theme.AMBER)
+
     def _label_step(self, step: int, total: int) -> None:
         """Say where the work is, in the plan's terms.
 
@@ -1300,12 +1401,14 @@ class MainWindow(QWidget):
         p.unloadRequested.connect(self.unload_model)
 
     def _wire_params(self, p) -> None:
+        p.resetRuntime.connect(self.reset_runtime)
         self.params_panel = p
         p.statusLine.connect(self._status)
         p.appearanceChanged.connect(self.apply_appearance)
 
     def _wire_agents(self, p) -> None:
         self.agents_panel = p
+        p.managePersonas.connect(self.open_personas)
         p.statusLine.connect(self._status)
         p.agentChosen.connect(self.switch_agent)
         p.set_roster(self._roster())
@@ -1354,6 +1457,12 @@ class MainWindow(QWidget):
         self.chat.add_note(f"You are now talking to {name}.", theme.AMBER)
         self._with("agents_panel", lambda p: p.refresh())
         self._status(f"Switched to {name}")
+
+    def _wire_prompt(self, p) -> None:
+        self.prompt_panel = p
+        p.statusLine.connect(self._status)
+        p.promptChanged.connect(lambda: self.requestPrepare.emit())
+        p.show_prompt(self._last_prompt)
 
     def _wire_canvas(self, p) -> None:
         self.canvas_panel = p
@@ -1549,11 +1658,12 @@ class MainWindow(QWidget):
         self.r_speed = Readout("speed")
         self.r_step = Readout("step")
         self.r_persona = Readout("persona")
+        self.r_recovery = Readout("runtime", "defaults")
         self.r_think = Readout("thinking")
         self.r_memories = Readout("memories")
         for r in (self.r_endpoint, self.r_model, self.r_ctx, self.r_profile,
                   self.r_dialect, self.r_tools, self.r_skills, self.r_persona,
-                  self.r_think,
+                  self.r_recovery, self.r_think,
                   self.r_memories, self.r_speed, self.r_step):
             lay.addWidget(r)
 
@@ -1664,9 +1774,18 @@ class MainWindow(QWidget):
         self.r_dialect.set(info["dialect"])
         self.r_tools.set(str(info["tools"]))
         self.r_skills.set(str(info["skills"]))
+        self._last_prompt = info.get("system_prompt") or self._last_prompt
+        self._with("prompt_panel", lambda p: p.show_prompt(self._last_prompt))
         self._tool_list = info.get("tool_list") or []
         self._with("tools_panel", lambda p: p.update_tools(self._tool_list))
         self.r_persona.set(info.get("persona") or "none")
+        warning = self.recovery_warning()
+        self.r_recovery.set(warning or "defaults")
+        if warning:
+            self.chat.add_note(
+                "Load-time settings changed to make this model fit: "
+                f"{warning}. These can cost quality — Params → Runtime has a "
+                "reset if the output looks wrong.", theme.AMBER)
         self.r_think.set(info.get("thinking", "off"))
         self.r_memories.set(str(info.get("memories", 0)))
         self.gauge.n_ctx = info["n_ctx"]
@@ -1817,6 +1936,42 @@ class MainWindow(QWidget):
         self.bar_status.setText(message)
         self.log.appendPlainText("[ui] " + message)
 
+    PROFILE_KEYS = ("ctx_size", "n_gpu_layers", "batch_size", "ubatch_size",
+                    "flash_attn", "no_kv_offload", "cpu_moe", "cache_type_k",
+                    "cache_type_v", "gpu_budget_mb")
+
+    def remember_profile(self, path: str) -> None:
+        """Record what worked for this model.
+
+        A model that needed flash attention off and a batch of 512 will need
+        them again tomorrow. Making the user rediscover that by watching it
+        fail is the sort of thing that makes local models feel unreliable when
+        the settings were simply forgotten.
+        """
+        if not path:
+            return
+        rt = self.cfg.runtime
+        self.cfg.model_profiles[str(Path(path).name)] = {
+            key: getattr(rt, key) for key in self.PROFILE_KEYS
+            if hasattr(rt, key)}
+        self.cfg.save()
+
+    def apply_profile(self, path: str) -> str:
+        """Put back the settings this model last loaded with."""
+        saved = self.cfg.model_profiles.get(str(Path(path).name))
+        if not saved:
+            return ""
+        rt = self.cfg.runtime
+        changed = []
+        for key, value in saved.items():
+            if hasattr(rt, key) and getattr(rt, key) != value:
+                setattr(rt, key, value)
+                changed.append(key)
+        if changed:
+            self.cfg.save()
+            self._with("params_panel", lambda p: p.refresh_preview())
+        return ", ".join(changed)
+
     def _preflight(self, path: str) -> bool:
         """Check the model can fit before spending a minute finding out.
 
@@ -1841,6 +1996,24 @@ class MainWindow(QWidget):
             usable = max(0, sample.mem_total_mb - 4096)   # leave the OS room
         except Exception:
             return True
+        # Sized before anything is attempted: the logits buffer is batch times
+        # vocabulary, so a model with a 262k vocabulary needs twice the buffer
+        # of a 152k one built from the same number of weights. That is why two
+        # models of the same size behave differently, and it is invisible in
+        # the file listing.
+        batch = self.cfg.runtime.batch_size or 2048
+        spare = max(256, int((usable - needed) * 0.4)) if usable > needed else 512
+        suggested = ggufmod.batch_that_fits(info, spare, batch)
+        if info.vocab and suggested < batch:
+            self.cfg.runtime.batch_size = suggested
+            self.cfg.runtime.ubatch_size = min(self.cfg.runtime.ubatch_size or 512,
+                                               max(64, suggested // 4))
+            self.cfg.save()
+            self.statusReady.emit(
+                f"{Path(path).name} has a {info.vocab:,}-token vocabulary; batch "
+                f"set to {suggested} so the output buffer fits "
+                f"({ggufmod.logits_buffer_mb(info, suggested):,} MB rather than "
+                f"{ggufmod.logits_buffer_mb(info, batch):,} MB)")
         if not usable or needed <= usable:
             return True
 
@@ -1909,6 +2082,9 @@ class MainWindow(QWidget):
         if not getattr(self, "_loading_path", "") == path:
             self._ngl_retries = 0        # a different model starts fresh
             self._loading_path = path
+            restored = self.apply_profile(path)
+            if restored:
+                self._status(f"Settings restored for {Path(path).name}")
             if not self._preflight(path):
                 self._status("Load cancelled")
                 return
@@ -1952,6 +2128,11 @@ class MainWindow(QWidget):
                             "to enable that.")
                 except Exception:
                     self.cfg.model_vision = False
+                from ..runtime import LAST_CAP
+                if LAST_CAP:
+                    self.chat.add_note(LAST_CAP[-1] + ".", theme.AMBER)
+                    LAST_CAP.clear()
+                self.remember_profile(path)
                 self.statusReady.emit(f"Loaded {Path(path).name}")
                 self.requestPrepare.emit()
             else:
@@ -1978,16 +2159,19 @@ class MainWindow(QWidget):
         self._status("llama-server did not start")
         self.chat.add_error("llama-server did not start.\n" + summary)
         hint = ""
-        if clustermod.compute_buffer_failure(summary):
+        if clustermod.flash_attention_failure(summary):
             rt = self.cfg.runtime
-            hint = ("\n\nThis is the compute buffer, not the weights or the KV "
-                    "cache. It is sized by the batch, so a model can fail here "
-                    "while comfortably fitting in memory — and a larger model "
-                    "with a narrower batch will load where this one did not."
-                    f"\n\nBatch is currently {rt.batch_size or 2048} with a "
-                    f"micro-batch of {rt.ubatch_size or 512}. Try 512 and 128 "
-                    "under Params \u2192 Runtime; it costs prompt-processing "
-                    "speed and nothing else.")
+            hint = ("\n\nVulkan builds a compute pipeline for flash attention "
+                    "when the model loads, and that needs device memory of its "
+                    "own. With the layers already filling the GPU there is "
+                    "none left, so the shader fails and the message names it "
+                    "rather than the memory."
+                    "\n\nSet flash attention to off under Params → Runtime, or "
+                    "lower the GPU layers to leave room. Kestrel will try this "
+                    "itself on the next attempt.")
+        elif clustermod.compute_buffer_failure(summary):
+            rt = self.cfg.runtime
+            hint = self._compute_buffer_hint()
         elif "unknown command" in summary:
             hint = ("\n\nThat message comes from the unified `llama` binary, which "
                     "expects a subcommand. Kestrel calls `llama serve` for it — if "
@@ -2046,6 +2230,18 @@ class MainWindow(QWidget):
         rt = self.cfg.runtime
         attempted = getattr(self.cluster.server, "attempted_ngl", -1)
         steps: list[tuple[str, dict]] = []
+        try:
+            summary = self.cluster.server.failure_summary()
+        except Exception:
+            summary = ""
+
+        # Named in the error, so it goes first: nothing else in the ladder
+        # addresses a shader that will not compile.
+        if (clustermod.flash_attention_failure(summary)
+                and rt.flash_attn != "off"):
+            steps.append(("turning flash attention off — its shader needs "
+                          "device memory of its own, and the layers have taken "
+                          "it all", {"flash_attn": "off"}))
 
         # The compute buffer is sized by the batch, not by the model or the
         # context, and "failed to allocate compute pp buffers" is that buffer
@@ -2069,14 +2265,20 @@ class MainWindow(QWidget):
         if not rt.cpu_moe:
             steps.append(("keeping the mixture-of-experts weights on the CPU",
                           {"cpu_moe": True}))
-        if not rt.cache_type_k.startswith("q8"):
-            steps.append(("using an 8-bit KV cache, which halves it",
-                          {"cache_type_k": "q8_0", "cache_type_v": "q8_0"}))
         if attempted > 8:
             steps.append((f"halving the GPU offload to {attempted // 2} layers",
                           {"n_gpu_layers": attempted // 2}))
         if attempted > 0:
             steps.append(("running entirely on the CPU", {"n_gpu_layers": 0}))
+        if not rt.cache_type_k.startswith("q8"):
+            # Late: a quantised cache halves the memory but is the change most
+            # likely to cost output quality, and on some Vulkan builds combined
+            # with flash attention it produces nonsense rather than an error.
+            steps.append(("using an 8-bit KV cache, which halves it — turning "
+                          "flash attention off with it, as the pair is unreliable "
+                          "on some builds",
+                          {"cache_type_k": "q8_0", "cache_type_v": "q8_0",
+                           "flash_attn": "off"}))
         current = rt.ctx_size or 4096
         if current > 4096:
             steps.append((f"halving the context to {max(4096, current // 2):,}",
@@ -2121,6 +2323,8 @@ class MainWindow(QWidget):
         self._ngl_retries += 1
         for key, value in changes.items():
             setattr(self.cfg.runtime, key, value)
+            if key not in self.cfg.runtime.recovered:
+                self.cfg.runtime.recovered.append(key)
         self.cfg.save()
         self.chat.add_note(f"That did not fit. Trying again {description}.",
                            theme.AMBER)
@@ -2675,6 +2879,29 @@ class MainWindow(QWidget):
         self._pending_prompt = prompt
         self._pending_mark = len(agent.history) if agent is not None else 0
         self.requestSend.emit(prompt)
+
+    def open_personas(self) -> None:
+        """The persona editor, opened from the agent that will wear it.
+
+        Kept as a window rather than a tab: choosing a character is something
+        you do while setting a role up, not something you watch.
+        """
+        if getattr(self, "_persona_window", None) is None:
+            panel = PersonaPanel(self.cfg)
+            panel.statusLine.connect(self._status)
+            panel.personaChanged.connect(self._persona_changed)
+            panel.personaChanged.connect(
+                lambda: self._with("agents_panel", lambda p: p._fill_personas()))
+            window = QDialog(self)
+            window.setWindowTitle("Personas")
+            window.resize(560, 640)
+            layout = QVBoxLayout(window)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(panel)
+            self._persona_window = window
+            self.persona_panel = panel
+        self._persona_window.show()
+        self._persona_window.raise_()
 
     def open_settings(self) -> None:
         """Application settings. Model settings live in the Params panel."""

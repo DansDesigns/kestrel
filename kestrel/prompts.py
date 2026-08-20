@@ -76,7 +76,11 @@ def build_system(
     if persona.strip():
         parts.append(persona.strip() + f"\nWorking directory: {workspace}")
     elif v == 0:
-        parts.append(f"You are Kestrel, an agent with tools. Working directory: {workspace}")
+        # With a team, the role's own line opens the prompt. Two openings —
+        # one generic, one specific — is the same conflict in miniature.
+        parts.append(f"Working directory: {workspace}" if team else
+                     f"You are Kestrel, an agent with tools. "
+                     f"Working directory: {workspace}")
     else:
         parts.append(
             "You are Kestrel, a capable agent that gets things done by using tools.\n"
@@ -91,7 +95,7 @@ def build_system(
 
     if team:
         # First, because who the model is being frames everything after it.
-        parts.insert(1, team)
+        parts.insert(0, team)
     if has_canvas:
         # Two lines in a tight budget, the full explanation when there is room:
         # the habit of pasting code into the reply is a strong one and a short

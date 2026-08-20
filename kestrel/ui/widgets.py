@@ -159,7 +159,10 @@ class ContextGauge(QWidget):
 
         right = f"{used:,}/{self.n_ctx:,}  {100 * used / self.n_ctx:.0f}%"
         if self.rate > 0:
-            right = f"{self.rate:.1f} tok/s   " + right
+            # Named, because llama.cpp's log reports prompt-processing speed
+            # in the same unit and the two differ by an order of magnitude — a
+            # bare figure invites the reading that one of them is wrong.
+            right = f"{self.rate:.1f} gen tok/s   " + right
         if self.compactions:
             right += f"   {self.compactions}\u00d7 compacted"
         right += f"   {self.profile.upper()}"
@@ -1546,9 +1549,18 @@ class WheelGuard(QObject):
             self._pass_upwards(owner, event)
             return True
         if isinstance(owner, self.TEXT_WIDGETS):
-            # Hand it to the page. Only where there is no page behind it does
-            # the box scroll itself, which is what keeps the transcript and the
-            # logs usable.
+            bar = owner.verticalScrollBar()
+            if bar.maximum() > 0:
+                # It has something to scroll, so it scrolls — until it reaches
+                # the end, at which point the page continues. Refusing outright
+                # was the wrong correction: it stopped a box of text stealing
+                # the page, but also made the text unreadable without dragging
+                # a scrollbar.
+                down = event.angleDelta().y() < 0
+                at_end = (bar.value() >= bar.maximum()) if down else (
+                    bar.value() <= bar.minimum())
+                if not at_end:
+                    return False
             return self._pass_upwards(owner, event)
         return False
 

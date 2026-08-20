@@ -144,6 +144,20 @@ class SettingsDialog(QDialog):
                                     "treated as a status update, not an answer")
         self.plan_driven.setChecked(c.plan_driven)
         lay.addWidget(self.plan_driven)
+        self.team = QCheckBox("Several agents sharing one model")
+        self.team.setToolTip("Off makes Kestrel a single assistant again — the "
+                             "roles, delegation and whiteboard tools go away")
+        self.team.setChecked(c.team_enabled)
+        lay.addWidget(self.team)
+
+        self.minimal = QCheckBox("Minimal prompt (for diagnosing bad output)")
+        self.minimal.setToolTip("Sends the task and the tools and nothing else: "
+                                "no team, canvas, memory, handover or thinking "
+                                "log. If output is still broken, the fault is "
+                                "below the prompt.")
+        self.minimal.setChecked(c.minimal_prompt)
+        lay.addWidget(self.minimal)
+
         self.bell = QCheckBox("Chime when a task finishes")
         self.bell.setChecked(c.bell_on_finish)
         lay.addWidget(self.bell)
@@ -188,6 +202,8 @@ class SettingsDialog(QDialog):
         c.watch_skills = self.watch_skills.isChecked()
         c.plan_driven = self.plan_driven.isChecked()
         c.bell_on_finish = self.bell.isChecked()
+        c.team_enabled = self.team.isChecked()
+        c.minimal_prompt = self.minimal.isChecked()
         c.bell_sound = self.bell_sound.currentData() or ""
         c.save()
         self._note("Agent settings saved")

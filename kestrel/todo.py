@@ -376,6 +376,23 @@ class TodoList:
         return bool(self.items) and all(
             i.status in (DONE, BLOCKED) for i in self.items)
 
+    def pointer(self) -> str:
+        """One line about the plan, rather than the plan itself.
+
+        The full checklist in every prompt costs its tokens on every turn and
+        grows as the work does — a seven-stage plan with sub-steps was taking
+        more of the window than the conversation. The file is the plan; this
+        says where the work is and how to read the rest.
+        """
+        if not self.items:
+            return ""
+        done, total = self.progress
+        current = self.current
+        where = f" · on {self.label_for(current)}: {current.text[:60]}" if current else ""
+        return (f"Plan: {done}/{total} done{where}. "
+                "PLAN.md in the project folder has the whole of it; "
+                "plan_read shows it here.")
+
     def render(self, counter=None, token_budget: int = 0) -> str:
         """The block injected into every prompt."""
         if not self.items:

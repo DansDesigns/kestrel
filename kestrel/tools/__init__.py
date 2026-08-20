@@ -147,7 +147,14 @@ class Registry:
             if p.name in args:
                 clean[p.name] = args[p.name]
             elif p.required:
-                return ToolResult(f"{tool.name} needs a '{p.name}' argument.", ok=False)
+                # The signature, not just the complaint: a model told only what
+                # is missing has to guess the rest, and guesses the same way
+                # again on the next attempt.
+                given = ", ".join(sorted(args)) or "nothing"
+                return ToolResult(
+                    f"{tool.name} needs a '{p.name}' argument. "
+                    f"Call it as {tool.signature()}. You passed: {given}.",
+                    ok=False)
         try:
             return tool.handler(**clean)
         except TypeError as e:

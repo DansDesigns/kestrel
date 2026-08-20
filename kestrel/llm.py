@@ -15,6 +15,9 @@ from typing import Any, Callable, Iterable
 import requests
 
 
+from . import reasoning as reasoningmod
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -34,8 +37,42 @@ class ChatResult:
         return self.completion_tokens / self.elapsed if self.elapsed > 0 else 0.0
 
 
+def _sse_lines(response, chunk_size: int = 8192):
+    """Yield lines from an event stream, decoded as UTF-8.
+
+    `iter_lines(decode_unicode=True)` cannot be used here. It decodes with the
+    response's charset, and for `text/event-stream` with no charset declared
+    requests falls back to latin-1 — so every multi-byte character arrives as
+    mojibake, and a character split across two network chunks is corrupted
+    outright.
+
+    Bytes are therefore buffered and split on newlines here, and only complete
+    lines are decoded. Decoding is incremental, so a character split across a
+    chunk boundary is held until the rest of it arrives rather than being
+    replaced with a question mark.
+    """
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    for chunk in response.iter_content(chunk_size=chunk_size):
+        if not chunk:
+            continue
+        buffer += decoder.decode(chunk)
+        while True:
+            index = buffer.find("\n")
+            if index < 0:
+                break
+            line, buffer = buffer[:index], buffer[index + 1:]
+            yield line.rstrip("\r")
+    buffer += decoder.decode(b"", final=True)
+    for line in buffer.split("\n"):
+        if line:
+            yield line.rstrip("\r")
+
+
 class LlamaClient:
-    def __init__(self, base_url: str, api_key: str = "", timeout: float = 600.0):
+    def __init__(self, base_url: str, api_key: str = "", timeout: float = 900.0):
         self.base = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -79,7 +116,8 @@ class LlamaClient:
                 return self._props
         data: dict = {}
         try:
-            r = self.session.get(self._url("/props"), headers=self._headers(), timeout=10)
+            r = self.session.get(self._url("/props"), headers=self._headers(),
+                                 timeout=(5, 60))
             if r.ok:
                 data = r.json()
         except Exception:
@@ -132,7 +170,8 @@ class LlamaClient:
 
     def tokenize(self, text: str) -> int:
         r = self.session.post(self._url("/tokenize"), headers=self._headers(),
-                              data=json.dumps({"content": text}), timeout=30)
+                              data=json.dumps({"content": text}),
+                              timeout=(10, 180))
         r.raise_for_status()
         toks = r.json().get("tokens", [])
         return len(toks)
@@ -164,7 +203,7 @@ class LlamaClient:
         ok = False
         try:
             r = self.session.post(self._url("/v1/chat/completions"), headers=self._headers(),
-                                  data=json.dumps(payload), timeout=45)
+                                  data=json.dumps(payload), timeout=(10, 120))
             ok = r.ok
         except Exception:
             ok = False
@@ -212,7 +251,13 @@ class LlamaClient:
         try:
             r = self.session.post(
                 self._url("/v1/chat/completions"), headers=self._headers(),
-                data=json.dumps(payload), timeout=self.timeout, stream=bool(stream),
+                # (connect, read). The read timeout is the gap between bytes,
+                # not the length of the answer — but a busy machine can take
+                # minutes to process a long prompt before the first token
+                # appears, and killing the request then throws away work that
+                # was going to arrive.
+                data=json.dumps(payload), timeout=(15, self.timeout),
+                stream=bool(stream),
             )
         except requests.RequestException as e:
             raise LLMError(f"cannot reach {self.base}: {e}") from e
@@ -242,10 +287,11 @@ class LlamaClient:
 
         content: list[str] = []
         reasoning: list[str] = []
+        splitter = reasoningmod.StreamSplitter()
         calls: dict[int, dict] = {}
         finish = ""
         usage: dict = {}
-        for raw in r.iter_lines(decode_unicode=True):
+        for raw in _sse_lines(r):
             if cancel is not None and cancel():
                 try:
                     r.close()
@@ -279,9 +325,19 @@ class LlamaClient:
                     on_reasoning(think)
             piece = delta.get("content")
             if piece:
-                content.append(piece)
-                if on_token:
-                    on_token(piece)
+                # A model may put its reasoning inline in the content rather
+                # than in a field of its own. Splitting it here keeps the tags
+                # out of the transcript and, more importantly, survives a tag
+                # arriving in two pieces.
+                visible, thought = splitter.feed(piece)
+                if thought:
+                    reasoning.append(thought)
+                    if on_reasoning:
+                        on_reasoning(thought)
+                if visible:
+                    content.append(visible)
+                    if on_token:
+                        on_token(visible)
             for tc in delta.get("tool_calls") or []:
                 idx = int(tc.get("index", len(calls)))
                 slot = calls.setdefault(idx, {"id": "", "type": "function",
@@ -293,6 +349,16 @@ class LlamaClient:
                     slot["function"]["name"] += fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
+
+        tail_visible, tail_thought = splitter.flush()
+        if tail_thought:
+            reasoning.append(tail_thought)
+            if on_reasoning:
+                on_reasoning(tail_thought)
+        if tail_visible:
+            content.append(tail_visible)
+            if on_token:
+                on_token(tail_visible)
 
         text = "".join(content)
         elapsed = time.time() - started

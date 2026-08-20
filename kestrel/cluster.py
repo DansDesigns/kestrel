@@ -338,6 +338,22 @@ COMPUTE_BUFFER = ("compute pp buffers", "compute buffer", "failed to create "
                   "context", "pinned memory")
 
 
+PIPELINE_TROUBLE = ("compute pipeline creation failed", "createcomputepipeline",
+                    "failed to allocate pinned memory", "flash_attn")
+
+
+def flash_attention_failure(text: str) -> bool:
+    """Did this fail building a shader rather than allocating a model?
+
+    Vulkan compiles a compute pipeline for flash attention at load, and that
+    needs device memory of its own. When the layers have already taken it all,
+    the pipeline fails and the message names a shader — which reads like a
+    driver fault rather than the memory pressure it is.
+    """
+    low = (text or "").lower()
+    return any(marker in low for marker in PIPELINE_TROUBLE)
+
+
 def compute_buffer_failure(text: str) -> bool:
     """Did this fail on the compute buffer rather than the model itself?
 

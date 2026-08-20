@@ -140,6 +140,13 @@ class Config:
     favourite_models: list[str] = field(default_factory=list)
     canvas_enabled: bool = True       # give the model the shared code canvas
     team_enabled: bool = True         # several agents sharing one model
+    minimal_prompt: bool = False      # strip everything optional, for diagnosis
+    plan_pointer_only: bool = True    # send a summary, not the whole checklist
+    system_prompt_override: str = ""  # replaces the assembled prompt entirely
+    # Load-time settings that worked, per model file. What fits is a property
+    # of the model and the machine, not of the session, so it is remembered
+    # rather than rediscovered by failing again.
+    model_profiles: dict = field(default_factory=dict)
     model_vision: bool = False        # the loaded model accepts images
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""

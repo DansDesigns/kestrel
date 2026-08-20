@@ -293,6 +293,19 @@ def clean_plan_lines(text: str) -> list[str]:
     return out[:12]
 
 
+IDENTITY_RE = re.compile(
+    r"^\s*you are [^.\n]+\.\s*", re.IGNORECASE)
+
+
+def strip_identity(text: str) -> str:
+    """Remove a persona's own "You are X." so the role can say it instead.
+
+    What is wanted from a persona here is its manner — how it speaks, what it
+    cares about — not a competing claim about who the model is.
+    """
+    return IDENTITY_RE.sub("", str(text or "")).strip()
+
+
 def collapse_repeats(text: str) -> str:
     """Fold immediately repeated lines or sentences into one.
 
@@ -416,7 +429,10 @@ class Agent:
         self.todo = TodoList.load(self.cfg.workspace_path())
         self.thoughts = ThoughtLog.load(self.cfg.workspace_path())
         self.handover = handovermod.load(self.cfg.workspace_path())
-        self.roster = Roster(self.cfg.workspace_path()) if self.cfg.team_enabled else None
+        # Minimal means minimal: the team tools go with the team text, or the
+        # diagnostic still carries most of what it is meant to rule out.
+        self.roster = (Roster(self.cfg.workspace_path())
+                       if self.cfg.team_enabled and not self._minimal() else None)
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         self.registry = build_registry(self.cfg, lambda: self.skills,
@@ -424,7 +440,8 @@ class Agent:
                                        memory_provider=lambda: self.memory,
                                        todo_provider=lambda: self.todo,
                                        persona_provider=lambda: self.persona,
-                                       roster_provider=lambda: self.roster,
+                                       roster_provider=(lambda: self.roster)
+                                       if self.roster is not None else None,
                                        delegate_fn=self.delegate)
         self.ctx = ContextManager(self.counter, self.budget, summarizer=self._summarize)
         self._system_cache = ""
@@ -438,6 +455,7 @@ class Agent:
             "model": self.client.model_name(),
             "budget": self.budget,
             "memories": self.memory.count() if self.memory else 0,
+            "system_prompt": self.system_prompt(),
             "tool_list": [
                 {"name": t.name, "summary": t.summary, "danger": t.danger,
                  "signature": t.signature(), "detail": t.detail,
@@ -494,6 +512,11 @@ class Agent:
             p = personamod.load_file(agent.persona_file)
             if p is not None:
                 return p
+        if self.roster is not None:
+            # With a team, a character belongs to a role. A session-wide
+            # persona left over from before would apply to every one of them at
+            # once, which is how Lead ended up also being Quartermaster.
+            return None
         if self.cfg.persona_file:
             p = personamod.load_file(self.cfg.persona_file)
             if p is not None:
@@ -528,7 +551,18 @@ class Agent:
             self.emit("memory_recall", {"memories": kept})
         return block
 
+    def _minimal(self) -> bool:
+        return bool(getattr(self.cfg, "minimal_prompt", False))
+
     def system_prompt(self) -> str:
+        override = (getattr(self.cfg, "system_prompt_override", "") or "").strip()
+        if override:
+            # Yours entirely: nothing is appended, because a prompt you edited
+            # and a prompt Kestrel then added to is not the one you tested.
+            return override
+        return self._assembled_prompt()
+
+    def _assembled_prompt(self) -> str:
         if self._system_cache:
             return self._system_cache
         assert self.registry is not None
@@ -540,10 +574,14 @@ class Agent:
             skills=self.skills,
             budget=self.budget,
             dialect=self.dialect,
-            persona=self._persona_text(),
+            # Passed only when there is no team: with one, the persona is
+            # folded into the role's own statement instead, or the prompt opens
+            # by naming two different people.
+            persona="" if self.roster is not None else self._persona_text(),
             has_plan_tools=bool(self.registry and "plan" in self.registry.tools),
-            has_canvas=bool(self.registry and "canvas_write" in self.registry.tools),
-            team=self._team_block(),
+            has_canvas=(not self._minimal() and bool(
+                self.registry and "canvas_write" in self.registry.tools)),
+            team="" if self._minimal() else self._team_block(),
         )
         return self._system_cache
 
@@ -671,7 +709,15 @@ class Agent:
         agent = self.roster.current()
         if agent is None:
             return ""
-        parts = [agent.briefing()]
+        # The persona's voice is folded into the role rather than stated
+        # separately, and its own name is dropped: the model is this agent, in
+        # that manner, not two people at once.
+        voice = ""
+        speaking_as = ""
+        if self.persona is not None and self.persona.any_content():
+            speaking_as = getattr(self.persona, "name", "") or ""
+            voice = strip_identity(self._persona_text())
+        parts = [agent.briefing(voice=voice, speaking_as=speaking_as)]
         if self.roster.agents and agent.name == self.roster.agents[0].name:
             names = [x.name for x in self.roster.agents]
             suggestion = agentsmod.route(self.thoughts.task, names)
@@ -730,7 +776,8 @@ class Agent:
         self.todo = TodoList.load(workspace) if self.cfg.todo_enabled else None
         self.thoughts = ThoughtLog.load(workspace)
         self.handover = handovermod.load(workspace)
-        self.roster = Roster(workspace) if self.cfg.team_enabled else None
+        self.roster = (Roster(workspace)
+                       if self.cfg.team_enabled and not self._minimal() else None)
         if self.memory is not None:
             self.memory.scope = self.cfg.memory_scope()
         # The registry closes over the workspace for its file sandbox, so it is
@@ -740,7 +787,8 @@ class Agent:
                                        memory_provider=lambda: self.memory,
                                        todo_provider=lambda: self.todo,
                                        persona_provider=lambda: self.persona,
-                                       roster_provider=lambda: self.roster,
+                                       roster_provider=(lambda: self.roster)
+                                       if self.roster is not None else None,
                                        delegate_fn=self.delegate)
         self._system_cache = ""
 
@@ -801,13 +849,18 @@ class Agent:
         resume = (self.handover.block()
                   if len(self.history) <= 1 and not handovermod.stale(self.handover)
                   else "")
+        if self._minimal():
+            # Nothing but the task. If output is still broken with this on, the
+            # fault is below the prompt — the weights, the cache or the
+            # template — and no amount of rewording will reach it.
+            resume = briefing = thoughts = ""
         opening = "\n\n".join(x for x in (resume, briefing, thoughts) if x)
         if opening:
             # A dozen lines of what has already been considered, for a model
             # whose own trace was discarded after the turn that produced it.
             self.history.append({"role": "user", "content": opening})
         self._finish_blocks = 0
-        memory_block = self._memory_block(readable)
+        memory_block = "" if self._minimal() else self._memory_block(readable)
         if not nested:
             self._autoplan(readable)
         final = ""
@@ -821,8 +874,13 @@ class Agent:
                 self.emit("cancelled", {})
                 return final or "(stopped)"
 
-            plan_block = (self.todo.render(self.counter, self.budget.plan)
-                          if self.todo else "")
+            # A pointer, not the plan. The file holds it and plan_read fetches
+            # it; sending the whole checklist every turn spends the window on
+            # something that has not changed since the last turn.
+            plan_block = (self.todo.pointer()
+                          if self.todo and self.cfg.plan_pointer_only
+                          else (self.todo.render(self.counter, self.budget.plan)
+                                if self.todo else ""))
             messages = self.ctx.assemble(self.system_prompt(), self.history,
                                          memory_block, plan_block)
             self.emit("context", {"usage": self.ctx.usage, "budget": self.budget,

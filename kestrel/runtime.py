@@ -50,6 +50,10 @@ class Runtime:
     tensor_split: str = ""
     gpu_budget_mb: int = 0        # 0 = ask the device; otherwise an override
     cpu_moe: bool = False         # keep mixture-of-experts weights on the CPU
+    # What the recovery ladder changed to make a model fit. Kept because the
+    # model needs it, recorded because these settings cost quality or speed and
+    # nobody would guess they were still on a week later.
+    recovered: list = field(default_factory=list)
 
     rope_scaling: str = ""
     rope_freq_base: float = 0.0
@@ -268,6 +272,30 @@ class Thinking:
 UNIFIED_NAMES = {"llama", "llama.exe"}
 
 
+# Set when a hand-set layer count had to be reduced, so the interface can say
+# so rather than silently disagreeing with the number on screen.
+LAST_CAP: list = []
+
+
+def cap_gpu_layers(cfg, model_path: str = "") -> tuple[int, str]:
+    """Trim a hand-set layer count that leaves the driver no room.
+
+    The headroom calculation only ran when the layer count was automatic, so a
+    number entered by hand — or left behind by an earlier recovery — could fill
+    the budget and fail at exactly the point the automatic path avoids. A
+    figure you chose is respected unless it cannot work, and then it is reduced
+    rather than allowed to fail.
+    """
+    wanted = cfg.runtime.n_gpu_layers
+    if wanted <= 0:
+        return wanted, ""
+    fits = resolve_gpu_layers(cfg, model_path)
+    if fits <= 0 or wanted <= fits:
+        return wanted, ""
+    return fits, (f"{wanted} layers would leave the driver no room for its "
+                  f"buffers; using {fits}")
+
+
 def resolve_gpu_layers(cfg, model_path: str = "") -> int:
     """Decide the split between GPU and system RAM.
 
@@ -301,8 +329,38 @@ def resolve_gpu_layers(cfg, model_path: str = "") -> int:
         system = 0
     ctx = cfg.runtime.ctx_size or 4096
     bits = 8 if cfg.runtime.cache_type_k.startswith("q8") else 16
+
+    # Room left for the driver's own allocations: compiled shaders, the
+    # attention scratch, the output buffer. Filling the budget with weights
+    # leaves nothing to build a compute pipeline in, and the load fails naming
+    # a shader rather than the memory.
+    #
+    # This is not wasted space. On integrated graphics every allocation comes
+    # from the same system RAM either way, so a layer left on the CPU costs
+    # little beyond the compute units it would have used — while a pipeline
+    # that cannot be built costs the whole load.
+    headroom = _driver_headroom_mb(info, cfg, best.integrated)
+    vram = max(0, vram - headroom)
     return gguf.layers_that_fit(info, vram, ctx, bits,
                                 integrated=best.integrated, system_mb=system)
+
+
+def _driver_headroom_mb(info, cfg, integrated: bool) -> int:
+    """Memory to keep free for shaders and scratch, in MB."""
+    from . import gguf
+
+    batch = cfg.runtime.batch_size or 2048
+    # The output buffer is the largest single piece and is knowable: batch
+    # times vocabulary times four bytes.
+    logits = gguf.logits_buffer_mb(info, batch)
+    # Shaders and attention scratch. Flash attention compiles more of them, so
+    # leaving it on needs more room, not less.
+    shaders = 700 if cfg.runtime.flash_attn != "off" else 350
+    reserve = logits + shaders
+    # An integrated GPU shares one pool with the operating system, so its
+    # ceiling is a driver limit rather than a physical one and is easier to
+    # walk into.
+    return int(reserve * (1.25 if integrated else 1.0))
 
 
 def _basename(path: str) -> str:
@@ -348,8 +406,18 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
         )
     rt = cfg.runtime
     cmd = server_argv(binary) + ["--host", rt.host, "--port", str(rt.port)]
-    if rt.n_gpu_layers < 0 and with_model:
-        cmd += ["-ngl", str(resolve_gpu_layers(cfg, model_path))]
+    if with_model:
+        if rt.n_gpu_layers < 0:
+            cmd += ["-ngl", str(resolve_gpu_layers(cfg, model_path))]
+        else:
+            # A hand-set count is respected unless it cannot work: filling the
+            # budget with layers is what leaves nothing to build the compute
+            # buffer in, and the failure names the buffer rather than the
+            # layers that took its room.
+            capped, why = cap_gpu_layers(cfg, model_path)
+            if why:
+                LAST_CAP.append(why)
+            cmd += ["-ngl", str(capped)]
 
     if with_model:
         model = model_path or cfg.model_path

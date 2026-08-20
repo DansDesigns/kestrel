@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import models as modelsmod
-from ..gguf import estimate_vram_mb, kv_bytes as gguf_kv_bytes
+from ..gguf import (estimate_vram_mb, kv_bytes as gguf_kv_bytes,
+                    logits_buffer_mb as gguf_logits_mb)
 from .. import attach as attachmod
 from .. import canvas as canvasmod
 from .. import (llamacpp, persona as personamod, sessions as sessionmod,
@@ -190,12 +191,21 @@ class ModelsPanel(UiThread, QWidget):
         self.tree.itemDoubleClicked.connect(lambda *_: self.load_selected())
         lay.addWidget(self.tree, 2)
 
+        self.detail_btn = QPushButton("Details")
+        self.detail_btn.setCheckable(True)
+        self.detail_btn.setToolTip("Show what is inside the selected model")
+        self.detail_btn.toggled.connect(self._toggle_detail)
+        lay.addWidget(self.detail_btn)
+
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
         self.detail.setFont(mono_font(10))
         self.detail.setObjectName("Flush")
         self.detail.setFrameShape(QFrame.NoFrame)
         self.detail.setMaximumHeight(168)
+        # Hidden until asked for: an empty box below the list is just less room
+        # for the list.
+        self.detail.hide()
         lay.addWidget(self.detail)
 
         self.star_btn = QPushButton("Favourite  ★")
@@ -288,9 +298,15 @@ class ModelsPanel(UiThread, QWidget):
         path = item.data(0, Qt.UserRole)
         return next((e for e in self.catalog.entries if str(e.path) == path), None)
 
+    def _toggle_detail(self, shown: bool) -> None:
+        self.detail.setVisible(shown and bool(self.detail.toPlainText().strip()))
+        self.detail_btn.setText("Hide details" if shown else "Details")
+
     def _show_detail(self, item, _prev=None) -> None:
         e = self._entry_for(item)
         if e is None:
+            self.detail.clear()
+            self.detail.hide()
             return
         ctx = self.cfg.runtime.ctx_size or 8192
         need = estimate_vram_mb(e.info, ctx)
@@ -299,6 +315,11 @@ class ModelsPanel(UiThread, QWidget):
         if e.repo:
             lines.append(f"repo           {e.repo}")
         kv = gguf_kv_bytes(e.info, ctx) / 1024 ** 3
+        if e.info.vocab:
+            batch = self.cfg.runtime.batch_size or 2048
+            lines.append(f"vocabulary      {e.info.vocab:,} tokens "
+                         f"({gguf_logits_mb(e.info, batch):,} MB of output "
+                         f"buffer at batch {batch})")
         lines.append(f"needs ~{need / 1024:.1f} GB at {ctx:,} ctx "
                      f"({e.info.size_gb:.1f} GB weights + {kv:.1f} GB KV cache)")
         try:
@@ -318,6 +339,8 @@ class ModelsPanel(UiThread, QWidget):
             lines.append(f"warning: {ctx:,} exceeds the trained context "
                          f"({e.info.n_ctx_train:,}); set rope scaling or lower it")
         self.detail.setPlainText("\n".join(lines))
+        # Shown only if asked for: the list is what the tab is for.
+        self.detail.setVisible(self.detail_btn.isChecked())
 
     def load_selected(self) -> None:
         e = self._entry_for(self.tree.currentItem())
@@ -368,6 +391,7 @@ class ModelsPanel(UiThread, QWidget):
 
 # =========================================================== params panel ===
 class ParamsPanel(QWidget):
+    resetRuntime = Signal()
     """Everything adjustable, in one place.
 
     Settings used to be split between a dialog and the side panels, which meant
@@ -447,6 +471,13 @@ class ParamsPanel(QWidget):
         self.rt_ngl.setValue(rt.n_gpu_layers)
         self.rt_ngl.valueChanged.connect(
             lambda v: self.split.set_value(v) if v >= 0 else None)
+        reset = QPushButton("Reset to defaults")
+        reset.setToolTip("Undo the settings the recovery ladder changed to make "
+                         "a model fit — an 8-bit cache and a reduced offload "
+                         "cost quality and speed")
+        reset.clicked.connect(self.resetRuntime.emit)
+        lay.addWidget(reset)
+
         auto = QPushButton("Auto")
         auto.setToolTip("Offload as many layers as the device can hold")
         auto.clicked.connect(self._auto_split)
@@ -2652,6 +2683,7 @@ class AgentsPanel(QWidget):
     statusLine = Signal(str)
     agentChosen = Signal(str)
     rosterEdited = Signal()
+    managePersonas = Signal()
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -2692,7 +2724,8 @@ class AgentsPanel(QWidget):
         self.persona_box = QComboBox()
         self.persona_box.currentIndexChanged.connect(self._persona_chosen)
         lay.addWidget(Field("Persona for this role", self.persona_box,
-                            "Leave as inherited to use the session's persona."))
+                            "A character on top of the job. Personas… writes "
+                            "and imports them."))
 
         row = QHBoxLayout()
         for text, slot, tip in (("Talk to", self.switch, "Switch the chat to this agent"),
@@ -2704,6 +2737,12 @@ class AgentsPanel(QWidget):
             b.clicked.connect(slot)
             row.addWidget(b)
         lay.addLayout(row)
+
+        personas = QPushButton("Personas…")
+        personas.setToolTip("Load, inspect and write the characters a role can "
+                            "wear")
+        personas.clicked.connect(self.managePersonas.emit)
+        lay.addWidget(personas)
 
         board = QPushButton("Open the whiteboard")
         board.setToolTip("The folder the agents hand work over in")
@@ -2749,7 +2788,7 @@ class AgentsPanel(QWidget):
     def _fill_personas(self) -> None:
         self.persona_box.blockSignals(True)
         self.persona_box.clear()
-        self.persona_box.addItem("inherited from the session", "")
+        self.persona_box.addItem("none — just the role", "")
         for found in personamod.discover(
                 personamod.default_persona_dirs(config_dir(), self.cfg.workspace)):
             self.persona_box.addItem(found.name, str(found.path))
@@ -2767,7 +2806,7 @@ class AgentsPanel(QWidget):
         self.rosterEdited.emit()
         self.statusLine.emit(
             f"{agent.name} now speaks as "
-            + (self.persona_box.currentText() if chosen else "the session persona"))
+            + (self.persona_box.currentText() if chosen else "no one in particular"))
 
     def _show(self) -> None:
         agent = self._selected()
@@ -2824,3 +2863,104 @@ class AgentsPanel(QWidget):
             return
         folder = self.roster.ensure_whiteboard()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+
+# ================================================================= prompt ===
+class PromptPanel(QWidget):
+    """What is actually being sent, and the means to change it.
+
+    A prompt assembled from a dozen sources is hard to argue with when you
+    cannot see it. This shows the whole thing, counts it, and lets it be
+    replaced outright — an override is used verbatim, because a prompt you
+    edited and Kestrel then appended to is not the one you tested.
+    """
+
+    statusLine = Signal(str)
+    promptChanged = Signal()
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self._assembled = ""
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 12, 8)
+        lay.setSpacing(6)
+
+        self.note = QLabel("The system prompt as sent.")
+        self.note.setWordWrap(True)
+        self.note.setObjectName("Dim")
+        lay.addWidget(self.note)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setObjectName("Flush")
+        self.editor.setFont(mono_font(10))
+        self.editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.editor.textChanged.connect(self._count)
+        lay.addWidget(self.editor, 1)
+
+        self.count = QLabel("")
+        self.count.setObjectName("Dim")
+        lay.addWidget(self.count)
+
+        row = QHBoxLayout()
+        for text, slot, tip in (
+                ("Use this", self.apply_override,
+                 "Send exactly this from now on, including after a restart"),
+                ("Revert", self.revert,
+                 "Go back to the prompt Kestrel assembles"),
+                ("Copy", self.copy, "Copy the whole prompt")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        lay.addLayout(row)
+
+    # -- state ---------------------------------------------------------------
+    def show_prompt(self, assembled: str) -> None:
+        """Called whenever the agent rebuilds it."""
+        self._assembled = assembled or ""
+        override = (self.cfg.system_prompt_override or "").strip()
+        if override:
+            if not self.editor.toPlainText().strip():
+                self.editor.setPlainText(override)
+            self.note.setText("Edited. This is sent verbatim — Revert returns "
+                              "to the assembled prompt.")
+        else:
+            self.editor.setPlainText(self._assembled)
+            self.note.setText("Assembled from the persona, tools, skills and "
+                              "plan. Edit and press Use this to send your own.")
+        self._count()
+
+    def _count(self) -> None:
+        text = self.editor.toPlainText()
+        words = len(text.split())
+        # Four characters to a token is the usual rule of thumb; exact enough
+        # to notice that a prompt has doubled.
+        self.count.setText(f"{len(text):,} characters · {words:,} words · "
+                           f"roughly {len(text) // 4:,} tokens")
+
+    # -- actions -------------------------------------------------------------
+    def apply_override(self) -> None:
+        text = self.editor.toPlainText().strip()
+        if not text:
+            self.statusLine.emit("An empty prompt is not an improvement.")
+            return
+        self.cfg.system_prompt_override = text
+        self.cfg.save()
+        self.promptChanged.emit()
+        self.statusLine.emit("Prompt saved — it will be used from the next message")
+        self.show_prompt(self._assembled)
+
+    def revert(self) -> None:
+        self.cfg.system_prompt_override = ""
+        self.cfg.save()
+        self.editor.setPlainText(self._assembled)
+        self.promptChanged.emit()
+        self.statusLine.emit("Back to the assembled prompt")
+        self.show_prompt(self._assembled)
+
+    def copy(self) -> None:
+        QApplication.clipboard().setText(self.editor.toPlainText())
+        self.statusLine.emit("Prompt copied")

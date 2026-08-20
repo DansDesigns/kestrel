@@ -51,7 +51,13 @@ def register(reg, provider) -> None:
         return ToolResult(f"Step {label} -> {item.status} "
                           f"({done}/{total} done).{extra}{tail}")
 
-    def plan_add(text: str, under: str = "") -> ToolResult:
+    def plan_read() -> ToolResult:
+        tl = provider()
+        if not tl.items:
+            return ToolResult("There is no plan yet.")
+        return ToolResult(tl.render())
+
+    def plan_add(text: str, under: str = "", new_stage: bool = False) -> ToolResult:
         tl = provider()
         parent = 0
         if under:
@@ -59,10 +65,17 @@ def register(reg, provider) -> None:
             if stage is None:
                 return ToolResult(f"No stage {under}. Current plan:\n" + tl.render(),
                                   ok=False)
-            parent = stage.stage_id if hasattr(stage, "stage_id") else (
-                stage.parent or stage.id)
+            parent = stage.parent or stage.id
+        elif not new_stage:
+            # Default to a sub-step of the stage in flight. Without this every
+            # note about what just happened becomes a new stage, and a plan of
+            # five turns into a list of twenty-one — which is a log, not a plan.
+            current = tl.current
+            stage = tl.stage_of(current) if current else None
+            parent = stage.id if stage else 0
         item = tl.add(text, parent=parent)
-        return ToolResult(f"Added {tl.label_for(item)}: {item.text}")
+        where = "as a new stage" if not item.parent else f"under {tl.label_for(stage)}"
+        return ToolResult(f"Added {tl.label_for(item)} {where}: {item.text}")
 
     reg.add(Tool("plan", "Write the checklist for this task, one stage per line.",
                  [Param("steps", "string", "Stages, one per line.", required=True),
@@ -84,10 +97,20 @@ def register(reg, provider) -> None:
                  detail="Mark a step doing when you start it and done when you "
                         "have checked it works. Closing every sub-step closes "
                         "its stage automatically."))
-    reg.add(Tool("plan_add", "Add a step, either a new stage or a sub-step.",
+    reg.add(Tool("plan_read", "Read the whole checklist.",
+                 [], plan_read, DANGER_SAFE,
+                 detail="Only a one-line summary is in your prompt. Read this "
+                        "when you need the detail — before starting a stage, or "
+                        "when picking up work you did not begin."))
+    reg.add(Tool("plan_add", "Add a step: a sub-step of what you are doing, or "
+                             "a new stage.",
                  [Param("text", "string", "The new step.", required=True),
                   Param("under", "string",
-                        "Stage label to put it under, e.g. 2. Omit for a new stage.")],
+                        "Stage label to put it under, e.g. 2. Defaults to the "
+                        "stage you are on."),
+                  Param("new_stage", "boolean",
+                        "True only for work the plan is genuinely missing.")],
                  plan_add, DANGER_SAFE,
-                 detail="Use under= to record progress inside a stage: 2a, 2b and "
-                        "so on, rather than adding top-level steps for each action."))
+                 detail="Notes about what you are doing become sub-steps of the "
+                        "stage you are on — 2a, 2b and so on. A new stage is for "
+                        "work nobody anticipated, not for each action you take."))

@@ -75,18 +75,32 @@ class AgentProfile:
             bits.append(f"{self.unread} unread")
         return " · ".join(bits)
 
-    def briefing(self) -> str:
-        """What the model is told about who it is being."""
-        lines = [f"You are {self.name}."]
+    def briefing(self, voice: str = "", speaking_as: str = "") -> str:
+        """Who the model is being, said once.
+
+        A persona and a role both want to open with "You are …", and a prompt
+        that says it four times over — as Quartermaster, as Lead, as the one
+        the user talks to, as one of several agents — is asking the model to
+        decide which of them it believes. The name, the job and the manner are
+        therefore assembled into a single statement.
+        """
+        opening = f"You are {self.name}"
+        if speaking_as and speaking_as.lower() != self.name.lower():
+            opening += f", speaking as {speaking_as}"
         if self.speciality:
-            lines.append(f"Your speciality: {self.speciality}.")
+            opening += f". Your speciality is {self.speciality}"
+        lines = [opening + "."]
+        if voice:
+            lines.append(voice.strip())
         if self.brief:
-            lines.append(self.brief)
+            # Any stray "You are …" in a hand-written brief is dropped for the
+            # same reason: the opening line has already said who this is.
+            from .agent import strip_identity
+            lines.append(strip_identity(self.brief) or self.brief)
         lines.append(
-            "You are one of several agents sharing this project. Hand work over "
-            "by writing files to the whiteboard folder, and use agent_send to "
-            "tell another agent something. They will read it when they next "
-            "run, not immediately.")
+            "Others share this project with you: hand work over as files on the "
+            "whiteboard, and agent_send tells one of them something — they read "
+            "it when they next run.")
         return "\n".join(lines)
 
     def deliver(self, message: Message) -> None:
@@ -201,7 +215,10 @@ class Roster:
         try:
             raw = json.loads(self.path.read_text("utf-8"))
         except (OSError, ValueError):
-            self.agents = list(DEFAULT_TEAM)
+            # Fresh objects, not a copy of a shared list: the same profiles
+            # would otherwise be handed to every project, so a persona chosen
+            # in one would appear in the next.
+            self.agents = _default_team()
             self.active = self.agents[0].name if self.agents else ""
             return
         self.agents = []
@@ -215,7 +232,7 @@ class Roster:
                 continue
         self.active = raw.get("active", "")
         if not self.agents:
-            self.agents = list(DEFAULT_TEAM)
+            self.agents = _default_team()
             self.active = self.agents[0].name
 
     def save(self) -> None:
@@ -281,7 +298,7 @@ def _default_team() -> list[AgentProfile]:
         AgentProfile(
             name="Lead",
             speciality="breaking work down and deciding what happens next",
-            brief="You are the one the user talks to. You keep the plan honest "
+            brief="The user talks to you. You keep the plan honest "
                   "and you delegate: writing or changing code goes to Builder, "
                   "checking it goes to Reviewer, writing it up goes to Scribe. "
                   "Use the delegate tool rather than doing their work yourself, "
@@ -290,18 +307,18 @@ def _default_team() -> list[AgentProfile]:
         AgentProfile(
             name="Builder",
             speciality="writing and changing code",
-            brief="You write the code. You work in the canvas, save real files, "
+            brief="You do the writing. You work in the canvas, save real files, "
                   "and you say what you changed rather than pasting it back."),
         AgentProfile(
             name="Reviewer",
             speciality="reading code for faults before they are shipped",
-            brief="You look for what will break. You are specific about lines "
+            brief="Look for what will break. You are specific about lines "
                   "and reasons, and you say when something is fine rather than "
                   "inventing problems."),
         AgentProfile(
             name="Scribe",
             speciality="notes, documentation and keeping the whiteboard tidy",
-            brief="You write things down so they survive the conversation. "
+            brief="Write things down so they survive the conversation. "
                   "Short, plain, and where someone will find it."),
     ]
 

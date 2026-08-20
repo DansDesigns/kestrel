@@ -255,6 +255,18 @@ asks for a decision, not "let me know if you want me to continue"), and the step
 limit ends it regardless. Every tool result carries a one-line plan status, so
 the model is never more than one message from knowing where it is.
 
+**Reasoning is separated as it streams.** A model may put its thinking in a
+field of its own, or inline in the content as `<think>…</think>`. The second is
+the awkward one: a tag can arrive split across chunks — `<thi` then `nk>` — and
+matching each chunk alone never sees it, so markup lands in the reply while
+pieces of the reply are filed as thinking. Text is therefore held back until it
+cannot be the start of a tag. Verified with the response delivered one character
+at a time, and at every chunk size in between.
+
+**A refused tool call says how to call it.** `todo needs a 'id' argument. Call it
+as todo(id, status="done", note?). You passed: nothing.` A model told only what
+is missing has to guess the rest, and guesses the same way again next time.
+
 **Drift correction.** Models reliably begin a task by maintaining the checklist
 and then quietly stop. After three steps without a change, a single-line reminder
 is appended to the next tool result. It costs about a dozen tokens and arrives at
@@ -297,6 +309,11 @@ which also protects a palette change made mid-reply.
 transcript when something has gone wrong and the least interesting when it has
 not, so it shows its opening with the whole of it one click away.
 
+The composer is one line to start with and grows with what is typed, to a
+maximum of eight. A box that opens four lines tall implies a paragraph is
+wanted, when most messages are a sentence; past eight it is a document, and
+taking the window for it would push away the conversation being replied to.
+
 **Sub-steps write themselves.** The two-level plan is only useful if something
 fills the second level, and a small model will not reliably do that while also
 doing the work. Kestrel knows exactly what happened, so it records it: every
@@ -309,6 +326,11 @@ tool that runs is logged as a sub-step of the stage in flight.
 2. [x] Create main.py
    2a. [x] write_file main.py
 ```
+
+`plan_add` follows the same rule: a note about what is being done attaches to
+the stage in flight unless `new_stage` is set. Without that default every
+observation becomes another stage, and a plan of five becomes a list of
+twenty-one — which is a log, not a plan.
 
 These are a record of what happened, not a list of what must happen, so they do
 not decide when a stage is finished — otherwise a stage would close the moment
@@ -750,15 +772,33 @@ byte-identical to the original.
 
 ## 8c. A team on one model
 
+Two switches in **Settings → Agent**. *Several agents sharing one model* turns
+the team off entirely, leaving a single assistant with no roles, delegation or
+whiteboard. *Minimal prompt* goes further, sending the task and the tools and
+nothing else — no team, canvas, memory, handover or thinking log — which exists
+to answer one question: if the output is still wrong with everything optional
+removed, the fault is below the prompt, in the weights, the cache or the
+template, and no amount of rewording will reach it.
+
+**One identity, said once.** A persona and a role both want to open with "You
+are …", and a prompt that says it four times — as Quartermaster, as Lead, as the
+one the user talks to, as one of several agents — is asking the model to decide
+which it believes. The name, the job and the manner are assembled into a single
+statement: *"You are Lead, speaking as Quartermaster. Your speciality is …"*. A
+persona's own identity line is stripped, because what is wanted from it here is
+its manner, not a competing claim about who the model is. With a team, a
+session-wide persona no longer applies at all — a character belongs to a role.
+
 **Roles and personas are not the same thing**, and both are worth having. A
 persona is who Kestrel is *to you* — tone, manner, background — applied across
 the session, with its own tiering so the full character costs nothing until the
 model asks for it. A role is what someone *does*: a speciality, its own
 conversation, a place work can be handed to.
 
-They compose. A role with no persona of its own inherits the session's, so a
-whole team can speak in one voice; give a role a persona and it speaks in that
-one instead. The **Agents** tab has the selector. Each role also carries a short
+A persona belongs to whoever is wearing it, so there is no separate Persona tab:
+each role picks one in the **Agents** tab, or none, and **Personas…** there opens
+the editor for writing and importing them. A role with no persona is just the
+job. Each role also carries a short
 brief — what the job is, not what the character is like, which is the persona's
 business.
 
@@ -939,6 +979,21 @@ picture it was never shown.
 
 ### 10.2b Why two models of the same size behave differently
 
+**The vocabulary matters as much as the weights.** llama.cpp allocates an output
+buffer of batch x vocabulary x 4 bytes, which has nothing to do with how large
+the model is:
+
+| Model | Vocabulary | Output buffer at batch 2048 |
+|---|---|---|
+| Gemma 4 26B-A4B | 262,144 | 2.00 GB |
+| Qwen3 27B | 151,936 | 1.16 GB |
+
+Nearly a gigabyte of difference between two 15 GB models. It is why a Gemma can
+fail to load while a larger Qwen succeeds, and why the error mentions compute
+buffers rather than the model. Kestrel reads the vocabulary and sizes the batch
+to it before the first attempt, saying what it did and why; the Models tab shows
+the vocabulary and the buffer it implies.
+
 The weights are only part of what a model needs. The KV cache scales with
 layers, key/value heads and context length, and varies enormously between
 models of similar file size:
@@ -982,6 +1037,51 @@ each failure:
 5. halve the GPU offload — repeatedly
 6. run entirely on the CPU
 7. halve the context
+
+An 8-bit KV cache sits near the end rather than early: it halves the memory but
+is the change most likely to cost output quality, and on some Vulkan builds it
+combines badly with flash attention to produce nonsense rather than an error —
+so it is applied with flash attention switched off.
+
+**Settings are remembered per model.** What fits is a property of the model and
+the machine, not of the session: a model that needed flash attention off and a
+batch of 512 will need them again tomorrow. Those settings are saved against the
+model's filename when it loads successfully and put back when it is next
+selected, so nobody has to rediscover them by watching it fail.
+
+**Headroom is reserved rather than filled.** The driver needs memory of its own
+for compiled shaders, attention scratch and the output buffer. Kestrel now works
+out how much — the output buffer is knowable as batch x vocabulary x 4, the rest
+is a fixed reserve that is larger when flash attention is on, since it compiles
+more shaders — and keeps it free before deciding how many layers fit.
+
+This is not wasted space. On integrated graphics every allocation comes from the
+same system RAM, so a layer left on the CPU costs little beyond the compute units
+it would have used, while a pipeline that cannot be built costs the entire load.
+The arithmetic on a 15 GB shared budget with Gemma 4 26B:
+
+| Batch | Flash attention | Reserved | Layers on the GPU |
+|---|---|---|---|
+| 2048 | auto | 3.4 GB | 40 of 62 |
+| 512 | auto | 1.5 GB | 46 of 62 |
+| 512 | off | 1.1 GB | 47 of 62 |
+| 128 | off | 0.6 GB | 49 of 62 |
+
+Nine more layers from the same budget, by not letting the driver run out.
+
+**Flash attention is its own failure.** Vulkan compiles a compute pipeline for
+it at load, and that needs device memory of its own; when the layers have taken
+it all, the pipeline fails with a message naming a shader —
+`Compute pipeline creation failed for flash_attn_f32_f16_aligned` — which reads
+like a driver fault rather than the memory pressure it is. Kestrel recognises it
+and turns flash attention off first, ahead of everything else in the ladder.
+
+**What recovery changed is recorded and shown.** These settings stay, because
+the model needs them to load at all, but an 8-bit cache or an offload of zero
+costs quality or speed and nobody would guess a week later that they were still
+on. The Status tab lists them, a note appears when a model loads with them
+active, and **Reset to defaults** in Params → Runtime undoes exactly the ones
+recovery set.
 
 Context is last because it is the only one that changes what the model can
 actually do; everything above it costs speed and nothing else. When the ladder
@@ -1245,6 +1345,11 @@ gives its width to the transcript; clicking again restores it to the width it
 had. The whole strip is the target rather than a small button, and the chevron
 points the way the panel will move.
 
+The generation rate is labelled `gen tok/s`, because llama.cpp's own log reports
+prompt-processing speed in the same unit and the two differ by an order of
+magnitude — 26 against 0.7 on a loaded laptop. A bare figure invites the reading
+that one of them is wrong.
+
 **Scaling.** A panel cannot be dragged narrower than its contents need. The
 floor is re-measured when a page is first built — panels are created on demand,
 and measuring before that finds an empty widget — and taken from the widest page
@@ -1392,6 +1497,11 @@ parameters. The system prompt tells the model; this tells you.
 and a finished run looks much like a stalled one at a glance. Settings → Agent
 switches it off, or replaces it: the bundled chime, anything the platform
 already provides, or a file of your own in wav, mp3, flac or ogg.
+
+**Prompt** shows the system prompt exactly as sent, with its size in characters,
+words and approximate tokens. It can be edited and saved: an override is used
+verbatim and survives a restart, because a prompt you edited and Kestrel then
+appended to is not the one you tested. Revert returns to the assembled version.
 
 **Right column.** A matching icon rail: the live task checklist; an activity tree
 recording every tool call with its complete untruncated output; the
