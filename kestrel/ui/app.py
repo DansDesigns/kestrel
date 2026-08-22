@@ -2179,6 +2179,14 @@ class MainWindow(QWidget):
                     from .. import gguf as ggufmod
                     info = ggufmod.read(path, want_template=False)
                     self.cfg.model_vision = bool(info.vision and info.projector)
+                    trouble = info.template_trouble
+                    if trouble and not self.cfg.runtime.chat_template:
+                        self.statusReady.emit(
+                            f"{Path(path).name}: {trouble}. Without the turn "
+                            "markers it was trained on, the model answers as a "
+                            "base model — nonsense, or a drift into another "
+                            "language. Set a chat template under Params → "
+                            "Runtime; chatml suits most Qwen builds.")
                     if info.vision and not info.projector:
                         self.statusReady.emit(
                             f"{Path(path).name} can read images, but no mmproj "

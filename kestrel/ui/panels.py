@@ -350,6 +350,8 @@ class ModelsPanel(UiThread, QWidget):
         if e.repo:
             lines.append(f"repo           {e.repo}")
         kv = gguf_kv_bytes(e.info, ctx) / 1024 ** 3
+        trouble = e.info.template_trouble
+        lines.append(f"chat template   {trouble or 'present'}")
         if e.info.vocab:
             batch = self.cfg.runtime.batch_size or 2048
             lines.append(f"vocabulary      {e.info.vocab:,} tokens "
@@ -480,6 +482,17 @@ class ParamsPanel(QWidget):
         self.budget_note.setObjectName("Dim")
         self.budget_note.setWordWrap(True)
         form.addRow("", self.budget_note)
+
+        self.rt_template = QComboBox()
+        self.rt_template.setEditable(True)
+        self.rt_template.addItems(["", "chatml", "llama3", "gemma", "mistral",
+                                   "zephyr", "vicuna", "deepseek", "command-r"])
+        self.rt_template.setCurrentText(rt.chat_template)
+        self.rt_template.setToolTip(
+            "Leave blank to use the template inside the model. Set one when "
+            "that template is missing or broken — the sign is nonsense output "
+            "or a drift into another language.")
+        form.addRow("Chat template", self.rt_template)
 
         self.rt_nkvo = QCheckBox("Keep the KV cache in system RAM")
         self.rt_nkvo.setToolTip("Frees graphics memory for the weights. The "
@@ -669,12 +682,14 @@ class ParamsPanel(QWidget):
         rt.cache_type_v = self.rt_cv.currentText()
         rt.no_mmap = self.rt_mmap.isChecked()
         rt.mlock = self.rt_mlock.isChecked()
+        rt.chat_template = self.rt_template.currentText().strip()
         rt.no_kv_offload = self.rt_nkvo.isChecked()
         rt.parallel = self.rt_parallel.value()
         rt.split_mode = self.rt_sm.currentText()
         rt.main_gpu = self.rt_mg.value()
         rt.tensor_split = self.rt_ts.text().strip()
         rt.gpu_budget_mb = self.rt_budget.value()
+        rt.chat_template = self.rt_template.currentText().strip()
         rt.no_kv_offload = self.rt_nkvo.isChecked()
         rt.cpu_moe = self.rt_cpumoe.isChecked()
         rt.rope_scaling = self.rt_rope.currentText()

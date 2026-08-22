@@ -50,6 +50,7 @@ class Runtime:
     tensor_split: str = ""
     gpu_budget_mb: int = 0        # 0 = ask the device; otherwise an override
     cpu_moe: bool = False         # keep mixture-of-experts weights on the CPU
+    chat_template: str = ""       # override a missing or broken one
     # What the recovery ladder changed to make a model fit. Kept because the
     # model needs it, recorded because these settings cost quality or speed and
     # nobody would guess they were still on a week later.
@@ -78,6 +79,11 @@ class Runtime:
         # Resolved by build_command, which knows the model and the device.
         if self.n_gpu_layers >= 0:
             a += ["-ngl", str(self.n_gpu_layers)]
+        if self.chat_template:
+            # A named template the server knows, used when the file's own is
+            # missing or broken. Without the right turn markers the model
+            # answers as a base model and the output looks corrupted.
+            a += ["--chat-template", self.chat_template]
         if self.cpu_moe:
             # A mixture-of-experts model activates a fraction of its weights per
             # token, so the idle experts are the cheapest thing to leave in

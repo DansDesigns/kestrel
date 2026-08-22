@@ -77,6 +77,35 @@ class GGUFInfo:
         return bool(t) and ("tools" in t or "tool_calls" in t)
 
     @property
+    def template_trouble(self) -> str:
+        """Why this model's chat template looks wrong, or "" if it looks fine.
+
+        A merged or converted model often carries a missing or truncated
+        template. The server then falls back to a generic one, the model never
+        sees the turn markers it was trained on, and it answers as a base model
+        would — drifting into whichever language dominated its training data.
+        Chinese from a Qwen and word salad are the usual shapes of it, and they
+        look like a broken quantisation rather than a missing template.
+        """
+        t = (self.chat_template or "").strip()
+        if not t:
+            return "no chat template"
+        if len(t) < 40:
+            return "the chat template is too short to be real"
+        markers = ("{%", "{{", "message", "role")
+        if not any(m in t for m in markers):
+            return "the chat template does not look like a template"
+        opens, closes = t.count("{%"), t.count("%}")
+        if opens and abs(opens - closes) > 1:
+            return "the chat template is truncated"
+        # A template that opens a loop or a condition and never closes it was
+        # cut somewhere, however balanced its braces happen to look.
+        for word, ender in (("for ", "endfor"), ("if ", "endif")):
+            if f"{{% {word}" in t and ender not in t:
+                return "the chat template is truncated"
+        return ""
+
+    @property
     def supports_thinking(self) -> bool:
         t = self.chat_template
         return bool(t) and ("<think>" in t or "enable_thinking" in t

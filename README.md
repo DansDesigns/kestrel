@@ -994,6 +994,23 @@ and compact the conversation away to make room. Without one they
 are described — dropping them silently is how a model ends up answering about a
 picture it was never shown.
 
+### 10.1a When the output is nonsense rather than the load
+
+A model that loads and then answers with word salad, or drifts into another
+language, is usually missing its chat template rather than broken. Merged and
+converted models often carry one that is absent or truncated; the server falls
+back to a generic template, the model never sees the turn markers it was trained
+on, and it answers as a base model would. Chinese from a Qwen build is the
+classic shape of it, and it looks exactly like a bad quantisation.
+
+Kestrel checks the template when a model loads — missing, too short to be real,
+not a template at all, or truncated mid-loop — and says so rather than leaving
+the output to be interpreted. **Chat template** in Params → Runtime supplies one
+by name (`chatml` suits most Qwen builds), which is passed to llama-server as
+`--chat-template`. The Models tab reports the state of it before loading.
+
+---
+
 ### 10.2a Comparing two models
 
 When one model of a family loads and another does not, the answer is almost
