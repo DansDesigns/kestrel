@@ -15,8 +15,19 @@ from ..todo import DONE, STATUSES
 def register(reg, provider) -> None:
     """`provider` returns the live TodoList."""
 
+    GREETINGS = {"hi", "hello", "hey", "yo", "morning", "afternoon", "evening",
+                 "thanks", "thank you", "ok", "okay", "sure", "cheers", "test"}
+
     def plan(steps: str, title: str = "", replace: bool = False) -> ToolResult:
         tl = provider()
+        # A plan for a greeting is not a plan, and the model that writes one
+        # then works through it — reading files and hunting skills for a task
+        # nobody set.
+        asked = " ".join(str(title or "").lower().split()).strip(" .!?")
+        if asked in GREETINGS:
+            return ToolResult(
+                f'"{title}" does not need a plan. Answer it and call finish.',
+                ok=False)
         # A plan already under way is not replaced on a whim. Models rewrite it
         # mid-task while reasoning, which throws away every step already closed
         # and leaves the work looking untouched.

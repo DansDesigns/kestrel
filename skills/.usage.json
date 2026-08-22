@@ -1,0 +1,28 @@
+{
+  "cega-graph-interaction": {
+    "archived_at": null,
+    "created_at": "2026-06-28T17:02:46.322398+00:00",
+    "created_by": null,
+    "last_patched_at": "2026-06-28T17:36:31.860811+00:00",
+    "last_used_at": "2026-06-28T17:37:20.703312+00:00",
+    "last_viewed_at": "2026-06-28T17:37:20.678828+00:00",
+    "patch_count": 3,
+    "pinned": false,
+    "state": "active",
+    "use_count": 1,
+    "view_count": 1
+  },
+  "hermes-agent-skill-authoring": {
+    "archived_at": null,
+    "created_at": "2026-06-28T15:07:54.441541+00:00",
+    "created_by": null,
+    "last_patched_at": null,
+    "last_used_at": "2026-06-28T15:07:54.454923+00:00",
+    "last_viewed_at": "2026-06-28T15:07:54.441541+00:00",
+    "patch_count": 0,
+    "pinned": false,
+    "state": "active",
+    "use_count": 1,
+    "view_count": 1
+  }
+}

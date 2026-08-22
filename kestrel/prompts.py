@@ -102,21 +102,27 @@ def build_system(
         # instruction does not displace it.
         # Even at the tightest budget this is worth its tokens: the habit of
         # pasting code into a reply is strong, and a vaguer instruction loses.
-        parts.append("Code goes in the canvas: canvas_write, canvas_edit, then "
-                     "canvas_save. Never paste code into your reply."
-                     if v == 0 else CANVAS_RULE)
+        # A rule, not an explanation of it. tool_help carries the arguments
+        # and the reasoning is not something the model has to be told twice.
+        parts.append("Code goes in the canvas (canvas_write, canvas_edit, "
+                     "canvas_save), never in your reply."
+                     if v <= 1 else CANVAS_RULE)
 
     if skills:
-        chars = 70 if v == 0 else (110 if v == 1 else 200)
-        lines = index_lines(skills, budget.max_skills, chars)
-        head = "Skills:" if v == 0 else (
-            "## Skills\n\nThese are procedures you can load on demand. Only the name and "
-            "description are here; open one to get its instructions.\n"
-        )
-        parts.append(f"{head}\n" + "\n".join(lines))
+        if v <= 1:
+            # Names only. A description is a summary of instructions the model
+            # can simply read, and skill_find searches them by keyword — so
+            # paying for summaries every turn buys nothing.
+            names = ", ".join(s.name for s in skills[:budget.max_skills])
+            parts.append(f"Skills (skill_open to read one): {names}")
+        else:
+            lines = index_lines(skills, budget.max_skills, 200)
+            parts.append("## Skills\n\n" + "\n".join(lines))
 
     if has_plan_tools:
-        parts.append(_PLAN_RULES[0] if v <= 1 else _PLAN_RULES[1])
+        # The long form only where there is room for it. plan_read fetches the
+        # checklist; the rules for keeping it are not worth a page every turn.
+        parts.append(_PLAN_RULES[0] if v <= 2 else _PLAN_RULES[1])
 
     rules = _GUIDANCE.get(max(1, v)) if v else None
     if rules:
@@ -144,8 +150,10 @@ Your reply says what you did and why. The code is already on screen."""
 
 _PLAN_RULES = [
     "If a checklist already exists below, work through it in order — do not "
-    "replace it. Otherwise call plan with one step per line. Mark each step "
-    "doing when you start it and done only when you have checked it works.",
+    "replace it. Otherwise, for work of several steps, call plan with one step "
+    "per line; a greeting or a question you can simply answer needs no plan and "
+    "no tools — answer it. Mark each step doing when you start it and done only "
+    "when you have checked it works.",
     """## The checklist
 
 **If a checklist is already shown below, it is your instructions.** It may have
@@ -155,8 +163,12 @@ discard it. If a step turns out to be wrong or impossible, mark it blocked with
 the reason, or call plan_add for a step it turns out to need; otherwise follow
 what is written.
 
-If there is no checklist and the task takes more than one step, call plan with
-one **stage** per line — three to seven is usually right.
+A greeting, a question you know the answer to, or anything you can finish in one
+reply needs no plan and no tools. Answer it and call finish. Planning a
+conversation is how a hello turns into six stages of work nobody asked for.
+
+If there is no checklist and the task genuinely takes more than one step, call
+plan with one **stage** per line — three to seven is usually right.
 
 A stage is a piece of work with an end. Looking at what already exists is one
 stage however many files you open; writing each file is a stage of its own:

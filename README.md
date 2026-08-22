@@ -855,7 +855,34 @@ Tools: `delegate`, `agent_list`, `agent_send`, `whiteboard_write`,
 
 ---
 
-### 8d. The tool listing shrinks with the window
+### 8d. The prompt is assembled, not written
+
+Everything optional is conditional. A section appears only when it is true and
+useful: the team line only with a team, delegation only when the tool exists,
+the canvas rule only when the canvas is enabled, the plan rules only when there
+are plan tools. Identity is one statement — name, role, a single line of manner
+— because a persona and a role each opening with "You are …" reads as two
+people arguing about who is answering.
+
+Nothing is explained that can be read. Tools list names with `tool_help` for
+arguments; skills list names with `skill_open` for instructions; the persona
+carries a line with `persona()` for the rest; the plan is a pointer with
+`plan_read` for the checklist. A description is a summary of something the model
+can simply fetch, and paying for summaries every turn buys nothing.
+
+At 4,096 tokens the whole system prompt is **261 tokens** — identity, protocol,
+21 tool names, one canvas rule and three skill names.
+
+### 8e. A greeting is not a task
+
+"hi" produced a six-stage plan, a skill search and two file reads, because the
+prompt said *"otherwise call plan"* without qualification. It now says that a
+greeting or a question you can simply answer needs no plan and no tools, and the
+plan tool refuses one titled with a greeting: *"'hi' does not need a plan.
+Answer it and call finish."* Planning a conversation is how a hello turns into
+six stages of work nobody asked for.
+
+### 8f. The tool listing shrinks with the window
 
 A model cannot call a tool it has not been told exists — a folder path would not
 do, because it would need a tool to look in the folder. But it does not need

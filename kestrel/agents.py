@@ -75,7 +75,9 @@ class AgentProfile:
             bits.append(f"{self.unread} unread")
         return " · ".join(bits)
 
-    def briefing(self, voice: str = "", speaking_as: str = "") -> str:
+    def briefing(self, voice: str = "", speaking_as: str = "",
+                 others: list | None = None, can_delegate: bool = False,
+                 terse: bool = False) -> str:
         """Who the model is being, said once.
 
         A persona and a role both want to open with "You are …", and a prompt
@@ -88,20 +90,27 @@ class AgentProfile:
         if speaking_as and speaking_as.lower() != self.name.lower():
             opening += f", speaking as {speaking_as}"
         if self.speciality:
-            opening += f". Your speciality is {self.speciality}"
+            opening += f", the one who handles {self.speciality}"
         lines = [opening + "."]
+
+        # One line of manner, not a paragraph. The persona file holds the rest
+        # and the persona tool fetches it; repeating it here spends the window
+        # on something the model can ask for.
         if voice:
-            lines.append(voice.strip())
-        if self.brief:
-            # Any stray "You are …" in a hand-written brief is dropped for the
-            # same reason: the opening line has already said who this is.
+            first = voice.strip().split(". ")[0].strip().rstrip(".")
+            lines.append(first + "." if first else "")
+        if self.brief and not terse:
             from .agent import strip_identity
-            lines.append(strip_identity(self.brief) or self.brief)
-        lines.append(
-            "Others share this project with you: hand work over as files on the "
-            "whiteboard, and agent_send tells one of them something — they read "
-            "it when they next run.")
-        return "\n".join(lines)
+            trimmed = (strip_identity(self.brief) or self.brief).strip()
+            lines.append(trimmed.split(". ")[0].rstrip(".") + ".")
+
+        # Only worth saying when it is true and actionable.
+        names = [n for n in (others or []) if n.lower() != self.name.lower()]
+        if names and can_delegate:
+            lines.append(f"Delegate to: {', '.join(names)}.")
+        elif names:
+            lines.append(f"Others here: {', '.join(names)}.")
+        return "\n".join(x for x in lines if x)
 
     def deliver(self, message: Message) -> None:
         self.inbox.append(message)

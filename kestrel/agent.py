@@ -717,7 +717,11 @@ class Agent:
         if self.persona is not None and self.persona.any_content():
             speaking_as = getattr(self.persona, "name", "") or ""
             voice = strip_identity(self._persona_text())
-        parts = [agent.briefing(voice=voice, speaking_as=speaking_as)]
+        parts = [agent.briefing(
+            voice=voice, speaking_as=speaking_as,
+            others=[x.name for x in self.roster.agents],
+            can_delegate=bool(self.registry and "delegate" in self.registry.tools),
+            terse=self.budget.verbosity <= 0)]
         if self.roster.agents and agent.name == self.roster.agents[0].name:
             names = [x.name for x in self.roster.agents]
             suggestion = agentsmod.route(self.thoughts.task, names)
