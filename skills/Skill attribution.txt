@@ -1,1 +1,2 @@
-Several skills inherited from Hermes
+Several skills inherited from Hermes:
+https://github.com/ZeroPointRepo/awesome-hermes-skills
