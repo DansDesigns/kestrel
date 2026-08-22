@@ -409,6 +409,16 @@ a span of them:
 | `canvas_edit` | Replace lines *start..end* |
 | `canvas_save` | Write it to a file in the workspace |
 
+**The canvas rule is in every prompt, at every budget.** It is the one
+instruction that changes what the model does rather than how it says it:
+
+> Files are made in the canvas, not in your reply and not with write_file:
+> canvas_write to draft, canvas_read to see it with line numbers, canvas_edit to
+> change lines, canvas_save to write it to disk.
+
+Dropping it on a small window is how a file ends up pasted into a reply, where
+it cannot be edited, run or saved.
+
 **Code in a reply is moved to the canvas.** Telling a model where to put code
 only works when it listens, and some do not — leaving a wall of source in the
 chat that cannot be edited, run or saved while the canvas beside it sits empty.
@@ -882,7 +892,30 @@ plan tool refuses one titled with a greeting: *"'hi' does not need a plan.
 Answer it and call finish."* Planning a conversation is how a hello turns into
 six stages of work nobody asked for.
 
-### 8f. The tool listing shrinks with the window
+### 8f. Catalogues are locations, not lists
+
+Neither the tools nor the skills are listed in the prompt. What appears is where
+to look:
+
+```
+Tools:
+tool_list() names every tool. tool_help(name) gives one's arguments.
+skill_index() lists the skills. finish(answer) ends the task.
+There are 24 tools. Look before you assume something is missing.
+
+61 skills are installed. skill_index() names them, skill_find(query)
+searches them, skill_open(name) reads one.
+```
+
+Four tool names have to appear — a model cannot call something it has never
+heard of, which is the one thing a folder path cannot fix. The other twenty do
+not. `TOOLS.md` and `SKILLS.md` are written into the config folder on startup
+with the full detail of both, for the model to read and for a person to browse.
+
+The whole system prompt at 4,096 tokens is **245 tokens** with 24 tools and 61
+skills installed.
+
+### 8g. The tool listing shrinks with the window
 
 A model cannot call a tool it has not been told exists — a folder path would not
 do, because it would need a tool to look in the folder. But it does not need
@@ -900,6 +933,42 @@ context with room to spare.
 ---
 
 ## 9. Skills
+
+**A skill can declare what it needs.** `requires: pypdf, python:yt-dlp,
+bin:ffmpeg` in the frontmatter, as a list or one comma-separated line. Opening
+the skill checks them and says so *before* the instructions, because a model
+that reads a skill through and only then finds it cannot run has spent those
+tokens for nothing:
+
+> NOT READY: this skill needs python:whisperx, python:yt-dlp, bin:ffmpeg, which
+> are not installed. Fix with: pip install whisperx yt-dlp; and install ffmpeg
+> yourself — a program, not a package
+
+`skill_install` installs the python packages a skill declares — only those, and
+only from that skill's own list. Programs are named but never installed
+silently. Skills without a `requires` line behave exactly as before, so anything
+written for another harness still works.
+
+**The catalogue is a file, not a prompt.** `SKILLS.md` is written into the
+config folder whenever skills are discovered — every skill's name, description,
+requirements and file path, in one place. It is rewritten on discovery rather
+than cached, because an index that lags behind the folder is worse than none:
+it is believed. `skill_index` reads it back for the model, and a person can open
+it to see what they installed.
+
+**Only relevant skills are named.** Every name costs tokens on every turn, and a
+library of two hundred is noise to a model choosing among them. The ones
+matching the current task are named; the rest stay findable through
+`skill_find`, which searches all of them by description. With 61 skills
+installed and a cluster-tuning task the prompt reads:
+
+```
+Skills (skill_open to read one): llama-cluster-tuning — 60 others,
+skill_index lists them all
+```
+
+197 tokens for the whole system prompt, against 168 that naming them all would
+have added. The model knows what it has without carrying the list.
 
 Kestrel implements the open [agentskills.io](https://agentskills.io/specification)
 format — the same `SKILL.md` layout used by Hermes, Claude Code, Codex CLI and

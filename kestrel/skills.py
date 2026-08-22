@@ -40,6 +40,57 @@ class Skill:
     metadata: dict = field(default_factory=dict)
     valid: bool = True
     problem: str = ""
+    # What the skill needs present to work: "pypdf", "python:pypdf",
+    # "bin:ffmpeg". Declared in frontmatter as `requires:`.
+    requires: list = field(default_factory=list)
+
+    def missing(self) -> list[str]:
+        """Requirements that are not installed.
+
+        Checked when a skill is opened rather than when it is written, because
+        a skill written for another harness will name things this machine has
+        never had — and finding that out halfway through a task, as a tool
+        failure, wastes the turns spent getting there.
+        """
+        import importlib.util
+        import shutil as _shutil
+
+        absent = []
+        for item in self.requires:
+            raw = str(item).strip()
+            if not raw:
+                continue
+            kind, _, name = raw.partition(":")
+            if not name:
+                kind, name = "python", kind
+            name = name.strip()
+            if kind == "bin":
+                if _shutil.which(name) is None:
+                    absent.append(f"bin:{name}")
+            else:
+                module = name.replace("-", "_").split("[")[0]
+                try:
+                    found = importlib.util.find_spec(module) is not None
+                except (ImportError, ValueError):
+                    found = False
+                if not found:
+                    absent.append(f"python:{name}")
+        return absent
+
+    def install_hint(self) -> str:
+        """How to satisfy what is missing, in one line."""
+        absent = self.missing()
+        if not absent:
+            return ""
+        pips = [a.split(":", 1)[1] for a in absent if a.startswith("python:")]
+        bins = [a.split(":", 1)[1] for a in absent if a.startswith("bin:")]
+        parts = []
+        if pips:
+            parts.append("pip install " + " ".join(pips))
+        if bins:
+            parts.append("and install " + ", ".join(bins) + " yourself — a "
+                         "program, not a package")
+        return "; ".join(parts)
 
     def body(self) -> str:
         try:
@@ -120,6 +171,7 @@ def load_skill(skill_md: Path, source: str = "") -> Skill | None:
     sk = Skill(
         name=name, description=desc, path=skill_md, root=root, source=source,
         license=str(fm.get("license") or ""),
+        requires=_as_list(fm.get("requires")),
         metadata=fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {},
     )
     has_frontmatter = bool(FRONTMATTER.match(text))
@@ -169,6 +221,15 @@ def discover_detailed(dirs, max_depth: int = 4):
             elif sk.name not in found:
                 found[sk.name] = sk
     return sorted(found.values(), key=lambda s: s.name), rejected
+
+
+def _as_list(value) -> list:
+    """Frontmatter written either way: a list, or one comma-separated line."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.replace(";", ",").split(",") if v.strip()]
+    return []
 
 
 def discover(dirs: list[str] | list[Path], max_depth: int = 4) -> list[Skill]:
@@ -279,3 +340,42 @@ def slug_name(name: str) -> str:
     """Skill names are lowercase and hyphenated by the specification."""
     cleaned = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")
     return cleaned[:60]
+
+
+INDEX_FILE = "SKILLS.md"
+
+
+def write_index(skills, path) -> "Path | None":
+    """Write the catalogue to one file: name, description, where it lives.
+
+    The prompt names only what looks relevant to the task, which keeps it small
+    but leaves the model unaware of the rest. This is the rest — one read away
+    rather than in every prompt, and readable by a person looking for what they
+    installed.
+    """
+    path = Path(path)
+    lines = [f"# Skills ({len(skills)} installed)", "",
+             "Open one with skill_open(name). skill_find(query) searches these "
+             "descriptions.", ""]
+    for sk in sorted(skills, key=lambda s: s.name.lower()):
+        needs = ", ".join(sk.requires) if sk.requires else ""
+        lines.append(f"## {sk.name}")
+        lines.append(sk.description or "(no description)")
+        if needs:
+            lines.append(f"Needs: {needs}")
+        lines.append(f"File: {sk.path}")
+        lines.append("")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), "utf-8")
+        return path
+    except OSError:
+        return None
+
+
+def index_summary(skills, path) -> str:
+    """The one line the prompt carries instead of the catalogue."""
+    if not skills:
+        return ""
+    return (f"{len(skills)} skills installed; the full list with descriptions "
+            f"is at {path}. skill_index reads it, skill_find searches it.")

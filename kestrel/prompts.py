@@ -61,6 +61,7 @@ def build_system(
     workspace: str,
     tool_listing: str,
     skills: list[Skill],
+    skill_total: int = 0,
     budget,
     dialect: str,
     persona: str = "",
@@ -104,17 +105,28 @@ def build_system(
         # pasting code into a reply is strong, and a vaguer instruction loses.
         # A rule, not an explanation of it. tool_help carries the arguments
         # and the reasoning is not something the model has to be told twice.
-        parts.append("Code goes in the canvas (canvas_write, canvas_edit, "
-                     "canvas_save), never in your reply."
-                     if v <= 1 else CANVAS_RULE)
+        # Always, at every budget. This is the one instruction that changes
+        # what the model does rather than how it says it, and dropping it at
+        # nano is how a file ends up pasted into a reply where it cannot be
+        # edited, run or saved.
+        parts.append(
+            "Files are made in the canvas, not in your reply and not with "
+            "write_file: canvas_write to draft, canvas_read to see it with "
+            "line numbers, canvas_edit to change lines, canvas_save to write "
+            "it to disk. Say what you did; the code is already on screen."
+            if v <= 1 else CANVAS_RULE)
 
     if skills:
         if v <= 1:
             # Names only. A description is a summary of instructions the model
             # can simply read, and skill_find searches them by keyword — so
             # paying for summaries every turn buys nothing.
-            names = ", ".join(s.name for s in skills[:budget.max_skills])
-            parts.append(f"Skills (skill_open to read one): {names}")
+            # Not a list: a count and where to look. skill_index names them,
+            # skill_find searches their descriptions.
+            total = skill_total or len(skills)
+            parts.append(f"{total} skills are installed. skill_index() names "
+                         "them, skill_find(query) searches them, skill_open"
+                         "(name) reads one.")
         else:
             lines = index_lines(skills, budget.max_skills, 200)
             parts.append("## Skills\n\n" + "\n".join(lines))

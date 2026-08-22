@@ -120,9 +120,15 @@ class Registry:
         it to know what is available.
         """
         if verbosity <= 0:
-            names = ", ".join(self.tools)
-            return (names + "\n\nCall tool_help(name) for a tool's arguments "
-                    "before using it for the first time.")
+            # Only what is needed to find the rest. A model cannot call a tool
+            # it has never heard of, so these four have to be named — but the
+            # other twenty do not, and naming them costs their tokens on every
+            # turn of every conversation.
+            return ("tool_list() names every tool. tool_help(name) gives one's "
+                    "arguments. skill_index() lists the skills. finish(answer) "
+                    "ends the task.\n"
+                    f"There are {len(self.tools)} tools. Look before you assume "
+                    "something is missing.")
         return "\n".join(t.line(verbosity) for t in self.tools.values())
 
     def help_for(self, name: str) -> str:
@@ -186,6 +192,32 @@ class Registry:
             return ToolResult(f"{tool.name} failed: {type(e).__name__}: {e}", ok=False)
 
 
+def write_index(reg, path) -> "Path | None":
+    """The tool catalogue as a file, for the model and for a person.
+
+    The prompt carries four names; this carries all of them with their
+    arguments. Written on startup so it cannot drift from what is registered.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    lines = [f"# Tools ({len(reg.tools)} available)", "",
+             "Call tool_help(name) for any of these.", ""]
+    for name, tool in reg.tools.items():
+        lines.append(f"## {name}")
+        lines.append(tool.summary)
+        lines.append(f"`{tool.signature()}`")
+        if getattr(tool, "detail", ""):
+            lines.append(tool.detail)
+        lines.append("")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), "utf-8")
+        return path
+    except OSError:
+        return None
+
+
 def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
                    todo_provider=None, persona_provider=None,
                    roster_provider=None, delegate_fn=None) -> Registry:
@@ -197,6 +229,20 @@ def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
     def tool_help(name: str) -> ToolResult:
         return ToolResult(reg.help_for(name))
 
+    def tool_list(contains: str = "") -> ToolResult:
+        names = [n for n in reg.tools
+                 if not contains or contains.lower() in n.lower()]
+        if not names:
+            return ToolResult(f"No tool with '{contains}' in its name. "
+                              f"All of them: {', '.join(reg.tools)}")
+        return ToolResult(", ".join(names)
+                          + "\n\ntool_help(name) for what one takes.")
+
+    reg.add(Tool("tool_list", "Name every tool, or those matching a word.",
+                 [Param("contains", "string", "Optional filter, e.g. canvas.")],
+                 tool_list, DANGER_SAFE,
+                 detail="The prompt names only the few needed to find the rest. "
+                        "Call this when you want to know what is available."))
     reg.add(Tool("tool_help", "What arguments a tool takes.",
                  [Param("name", "string", "The tool's name.", required=True)],
                  tool_help, DANGER_SAFE,

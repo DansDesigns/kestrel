@@ -378,6 +378,7 @@ class Agent:
         self.thoughts = ThoughtLog()       # replaced with the project's log on prepare
         self.handover = handovermod.Handover()
         self.roster = None
+        self.skills_index = None
         self._prose_streak = 0
         self.skills: list[skillmod.Skill] = []
         self.registry: Registry | None = None
@@ -435,6 +436,12 @@ class Agent:
                        if self.cfg.team_enabled and not self._minimal() else None)
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
+        # Written on discovery so it is current: an index that lags behind the
+        # folder is worse than none, because it is believed.
+        from .config import config_dir
+        self.skills_index = skillmod.write_index(
+            self.skills, config_dir() / skillmod.INDEX_FILE)
+        self.tools_index = None
         self.registry = build_registry(self.cfg, lambda: self.skills,
                                        approver=self._approve,
                                        memory_provider=lambda: self.memory,
@@ -443,6 +450,14 @@ class Agent:
                                        roster_provider=(lambda: self.roster)
                                        if self.roster is not None else None,
                                        delegate_fn=self.delegate)
+        # Written after the registry exists, beside the skills index, so both
+        # catalogues on disk match what is actually loaded.
+        try:
+            from .tools import write_index as write_tool_index
+            self.tools_index = write_tool_index(self.registry,
+                                                config_dir() / "TOOLS.md")
+        except Exception:
+            self.tools_index = None
         self.ctx = ContextManager(self.counter, self.budget, summarizer=self._summarize)
         self._system_cache = ""
 
@@ -571,7 +586,8 @@ class Agent:
         self._system_cache = prompts.build_system(
             workspace=str(self.cfg.workspace_path()),
             tool_listing=listing,
-            skills=self.skills,
+            skills=self._relevant_skills(),
+            skill_total=len(self.skills),
             budget=self.budget,
             dialect=self.dialect,
             # Passed only when there is no team: with one, the persona is
@@ -604,6 +620,12 @@ class Agent:
         so clearing it is all that is needed for the next turn to see them.
         """
         self.skills = skillmod.discover(self.cfg.skills_dirs)
+        # Written on discovery so it is current: an index that lags behind the
+        # folder is worse than none, because it is believed.
+        from .config import config_dir
+        self.skills_index = skillmod.write_index(
+            self.skills, config_dir() / skillmod.INDEX_FILE)
+        self.tools_index = None
         self._system_cache = ""
         return self.skills
 
@@ -701,6 +723,27 @@ class Agent:
         agent.history = [dict(m) for m in self.history]
         agent.turns += 1
         self.roster.note(agent.name, status=IDLE, activity="")
+
+    def _relevant_skills(self) -> list:
+        """Which skills to name in the prompt.
+
+        Every name costs tokens on every turn, and a library of two hundred is
+        noise to a model choosing among them. The ones matching what is being
+        worked on are named; the rest stay findable through skill_find, which
+        searches all of them by description.
+        """
+        if not self.skills:
+            return []
+        limit = max(3, self.budget.max_skills)
+        if len(self.skills) <= limit:
+            return self.skills
+        task = self.thoughts.task or self._first_user_message()
+        matched = skillmod.search(self.skills, task, limit=limit) if task else []
+        if not matched:
+            return self.skills[:limit]
+        # Keep the order stable so the prompt does not churn between turns.
+        chosen = {s.name for s in matched}
+        return [s for s in self.skills if s.name in chosen]
 
     def _team_block(self) -> str:
         """Who this is, and anything waiting for them."""
