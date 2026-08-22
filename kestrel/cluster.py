@@ -694,3 +694,105 @@ class ServerProcess:
                 return True
             time.sleep(0.3)
         return False
+
+
+class LocalNode:
+    """Serve this machine to another Kestrel as a cluster worker.
+
+    The same thing `kestrel-node` does from a terminal, started from the
+    interface instead. Two processes: rpc-server, which lends this machine's
+    memory and compute to a model running elsewhere, and a beacon so the other
+    machine can find it without being told an address.
+
+    Worth being clear about the trade: a node gives its memory to somebody
+    else's model. Running one while this machine is also running its own model
+    means both are short. The interface says so rather than letting it be
+    discovered as slowness.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.process = None
+        self.stop_beacon = threading.Event()
+        self.error = ""
+        self.port = 0
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def start(self, port: int = 50052, beacon_port: int = 50051,
+              label: str = "", on_log=None) -> bool:
+        if self.running:
+            return True
+        binary = find_rpc_binary(getattr(self.cfg, "rpc_bin", ""))
+        if not binary:
+            self.error = ("No rpc-server binary found. It is built alongside "
+                          "llama-server; point at it in Settings if it lives "
+                          "elsewhere.")
+            return False
+        self.error = ""
+        self.port = int(port)
+        command = [binary, "-p", str(port), "-H", "0.0.0.0"]
+        try:
+            self.process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as e:
+            self.error = f"Could not start rpc-server: {e}"
+            return False
+
+        payload = {"magic": BEACON_MAGIC, "host": _best_local_ip(),
+                   "rpc_port": int(port), "label": label or socket.gethostname(),
+                   "mem_mb": _total_memory_mb()}
+        self.stop_beacon.clear()
+        threading.Thread(target=broadcast,
+                         args=(beacon_port, payload, 3.0, self.stop_beacon,
+                               on_log),
+                         daemon=True).start()
+        if on_log:
+            on_log(f"serving on {payload['host']}:{port} as "
+                   f"'{payload['label']}'")
+        return True
+
+    def stop(self) -> None:
+        self.stop_beacon.set()
+        if self.process is not None:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=6)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+        self.process = None
+
+    def summary(self) -> str:
+        if self.error:
+            return self.error
+        if not self.running:
+            return "Not serving. Other machines cannot use this one."
+        return (f"Serving on port {self.port}. Another Kestrel on this network "
+                "can discover and use this machine's memory.")
+
+
+def _best_local_ip() -> str:
+    """The address other machines would reach this one on."""
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))       # no packet is sent
+        address = probe.getsockname()[0]
+        probe.close()
+        return address
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+
+
+def _total_memory_mb() -> int:
+    try:
+        import psutil
+        return int(psutil.virtual_memory().total / (1024 ** 2))
+    except Exception:
+        return 0

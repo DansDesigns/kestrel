@@ -327,6 +327,21 @@ class ClusterPanel(UiThread, QWidget):
         self.discover_btn = QPushButton("Discover")
         self.discover_btn.setToolTip("Listen for kestrel-node beacons on the LAN")
         self.discover_btn.clicked.connect(self.discover)
+        # This machine as a worker for somebody else's model.
+        self.node_btn = QPushButton("Serve this machine as a node")
+        self.node_btn.setCheckable(True)
+        self.node_btn.setToolTip(
+            "Run rpc-server here so another Kestrel on the network can use "
+            "this machine's memory. It will announce itself; the other machine "
+            "finds it with Discover.")
+        self.node_btn.toggled.connect(self.toggle_node)
+        lay.addWidget(self.node_btn)
+
+        self.node_line = QLabel("Not serving. Other machines cannot use this one.")
+        self.node_line.setObjectName("Dim")
+        self.node_line.setWordWrap(True)
+        lay.addWidget(self.node_line)
+
         probe = QPushButton("Test all")
         probe.clicked.connect(self.probe)
         row2.addWidget(self.discover_btn)
@@ -430,6 +445,34 @@ class ClusterPanel(UiThread, QWidget):
             self.ui(done)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def toggle_node(self, serving: bool) -> None:
+        """Start or stop serving this machine to the cluster."""
+        if not hasattr(self, "node"):
+            self.node = clustermod.LocalNode(self.cfg)
+        if not serving:
+            self.node.stop()
+            self.node_btn.setText("Serve this machine as a node")
+            self.node_line.setText(self.node.summary())
+            self.logLine.emit("[node] stopped")
+            return
+
+        if self.cfg.model_path and getattr(self.cfg, "server_running", False):
+            # Said once, not enforced: sharing a machine that is also running a
+            # model is a legitimate thing to do, it is just slower than either
+            # alone and nobody expects it.
+            self.logLine.emit("[node] this machine is also running a model; "
+                              "both will be short of memory")
+        ok = self.node.start(port=self.cfg.rpc_port or 50052,
+                             beacon_port=self.cfg.beacon_port or 50051,
+                             label=self.cfg.node_label,
+                             on_log=lambda m: self.logLine.emit(f"[node] {m}"))
+        self.node_btn.setChecked(ok)
+        self.node_btn.setText("Stop serving" if ok else
+                              "Serve this machine as a node")
+        self.node_line.setText(self.node.summary())
+        if not ok:
+            self.logLine.emit(f"[node] {self.node.error}")
 
     def probe(self) -> None:
         def work():

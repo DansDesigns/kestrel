@@ -148,6 +148,10 @@ class Config:
     # rather than rediscovered by failing again.
     model_profiles: dict = field(default_factory=dict)
     last_good_model: str = ""         # the last one that loaded, for comparison
+    # Serving this machine to other Kestrels.
+    rpc_port: int = 50052             # where rpc-server listens
+    beacon_port: int = 50051          # where the announcement goes
+    node_label: str = ""              # blank uses the hostname
     model_vision: bool = False        # the loaded model accepts images
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""
