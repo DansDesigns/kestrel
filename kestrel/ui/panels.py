@@ -165,12 +165,23 @@ class ModelsPanel(UiThread, QWidget):
         self.filter.setClearButtonEnabled(True)
         self.filter.setPlaceholderText("Filter models…")
         self.filter.textChanged.connect(self._refilter)
-        lay.addWidget(self.filter)
-        rescan = QPushButton("Rescan")
+        # The filter and the two folder actions on one line: they are all
+        # "which models am I looking at", and two full-width buttons for it
+        # took as much room as four rows of the list.
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(self.filter, 1)
+        rescan = QPushButton("\u2315")
+        rescan.setToolTip("Rescan the model folders")
+        rescan.setFixedWidth(34)
+        top.addWidget(rescan)
         rescan.clicked.connect(self.rescan)
-        folder = QPushButton("Add folder…")
+        folder = QPushButton("+")
+        folder.setToolTip("Add a folder of models")
+        folder.setFixedWidth(34)
         folder.clicked.connect(self._add_folder)
-        lay.addWidget(_row(rescan, folder))
+        top.addWidget(folder)
+        lay.addLayout(top)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["", "Model", "Quant", "Size", "Ctx"])
@@ -191,17 +202,15 @@ class ModelsPanel(UiThread, QWidget):
         self.tree.itemDoubleClicked.connect(lambda *_: self.load_selected())
         lay.addWidget(self.tree, 2)
 
-        self.compare_btn = QPushButton("Compare with loaded")
-        self.compare_btn.setToolTip("What differs between this model and the "
-                                    "one that last loaded")
-        self.compare_btn.clicked.connect(self.compare_with_loaded)
-        lay.addWidget(self.compare_btn)
-
+        # Two ways of looking at the selection, side by side.
         self.detail_btn = QPushButton("Details")
         self.detail_btn.setCheckable(True)
         self.detail_btn.setToolTip("Show what is inside the selected model")
         self.detail_btn.toggled.connect(self._toggle_detail)
-        lay.addWidget(self.detail_btn)
+        self.star_btn = QPushButton("Favourite  ★")
+        self.star_btn.setToolTip("Keep this model at the top of the list")
+        self.star_btn.clicked.connect(self.toggle_favourite)
+        lay.addWidget(_row(self.detail_btn, self.star_btn))
 
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
@@ -214,23 +223,24 @@ class ModelsPanel(UiThread, QWidget):
         self.detail.hide()
         lay.addWidget(self.detail)
 
-        self.star_btn = QPushButton("Favourite  ★")
-        self.star_btn.setToolTip("Keep this model at the top of the list")
-        self.star_btn.clicked.connect(self.toggle_favourite)
-        lay.addWidget(self.star_btn)
-
         self.load_btn = QPushButton("Load model")
         self.load_btn.setObjectName("Primary")
         self.load_btn.clicked.connect(self.load_selected)
         self.unload_btn = QPushButton("Unload")
         self.unload_btn.clicked.connect(self.unloadRequested.emit)
         lay.addWidget(_row(self.load_btn, self.unload_btn))
-        self.delete_btn = QPushButton("Delete from disk…")
-        self.delete_btn.setObjectName("Danger")
+        # Comparing is what you do just before deciding to delete something,
+        # so the two sit together.
+        self.compare_btn = QPushButton("Compare")
+        self.compare_btn.setToolTip("What differs between this model and the "
+                                    "one that last loaded successfully")
+        self.compare_btn.clicked.connect(self.compare_with_loaded)
+        self.delete_btn = QPushButton("Delete…")
+        self.delete_btn.setObjectName("Destructive")
         self.delete_btn.setToolTip("Permanently remove this model file, and its "
                                    "other parts if it is sharded")
         self.delete_btn.clicked.connect(self.delete_selected)
-        lay.addWidget(self.delete_btn)
+        lay.addWidget(_row(self.compare_btn, self.delete_btn))
         return w
 
     def rescan(self) -> None:

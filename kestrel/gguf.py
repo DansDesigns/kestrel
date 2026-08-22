@@ -482,3 +482,30 @@ def differences(a: "GGUFInfo", b: "GGUFInfo") -> str:
     for label, left, right in rows:
         lines.append(f"{label:<{width}}   {left:<28}   {right}")
     return "\n".join(lines)
+
+
+def embedding_bytes(info: "GGUFInfo") -> int:
+    """The token embedding and output tensors, which are not per-layer.
+
+    llama.cpp keeps the output tensor on the device even at partial offload, so
+    it is resident whatever the layer count says. Treating the file as an even
+    stack of layers spreads it across them and gets the arithmetic wrong in
+    both directions — a gigabyte and a half on a wide-vocabulary model, in a
+    budget where four hundred megabytes decides whether a model loads.
+    """
+    if not (info.vocab and info.n_embd):
+        return 0
+    # Quantised models commonly keep these at higher precision than the body,
+    # so the body's bits-per-weight would understate them.
+    quant = (info.quant or "").upper()
+    if "F16" in quant or "BF16" in quant:
+        bits = 16.0
+    elif "Q8" in quant:
+        bits = 8.5
+    elif "Q6" in quant or "Q5" in quant:
+        bits = 6.6
+    else:
+        bits = 6.6      # a Q4 body usually carries Q6 embeddings
+    # Embedding in, output out. Tied embeddings share one, so this is an upper
+    # bound — which is the right way to be wrong when deciding what fits.
+    return int(2 * info.vocab * info.n_embd * bits / 8)

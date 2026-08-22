@@ -1077,6 +1077,13 @@ batch of 512 will need them again tomorrow. Those settings are saved against the
 model's filename when it loads successfully and put back when it is next
 selected, so nobody has to rediscover them by watching it fail.
 
+**The embedding and output tensors are counted separately.** They are not part
+of the per-layer stack — llama.cpp keeps the output tensor on the device even at
+partial offload — so treating the file as an even pile of layers spreads them
+across it and gets the arithmetic wrong. On a 152k vocabulary that is 1.2 GB; on
+Gemma's 262k it is 2.1 GB, in a budget where four hundred megabytes decides
+whether a model loads at all.
+
 **Headroom is reserved rather than filled.** The driver needs memory of its own
 for compiled shaders, attention scratch and the output buffer. Kestrel now works
 out how much — the output buffer is knowable as batch x vocabulary x 4, the rest

@@ -2231,8 +2231,10 @@ class MainWindow(QWidget):
                     "itself on the next attempt.")
         elif clustermod.compute_buffer_failure(summary):
             rt = self.cfg.runtime
-            hint = self._compute_buffer_hint() + self._comparison_hint(
-                getattr(self, "_loading_path", ""))
+            # The comparison stays on the Models tab, where it is a deliberate
+            # question. In a failure dialog it is one more paragraph between
+            # the person and what to do about it.
+            hint = self._compute_buffer_hint()
         elif "unknown command" in summary:
             hint = ("\n\nThat message comes from the unified `llama` binary, which "
                     "expects a subcommand. Kestrel calls `llama serve` for it — if "

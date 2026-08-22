@@ -356,7 +356,10 @@ def _driver_headroom_mb(info, cfg, integrated: bool) -> int:
     # Shaders and attention scratch. Flash attention compiles more of them, so
     # leaving it on needs more room, not less.
     shaders = 700 if cfg.runtime.flash_attn != "off" else 350
-    reserve = logits + shaders
+    # The embedding and output tensors sit outside the per-layer arithmetic
+    # and are resident whatever the offload is set to.
+    embeddings = int(gguf.embedding_bytes(info) / (1024 ** 2))
+    reserve = logits + shaders + embeddings
     # An integrated GPU shares one pool with the operating system, so its
     # ceiling is a driver limit rather than a physical one and is easier to
     # walk into.

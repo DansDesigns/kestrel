@@ -213,6 +213,8 @@ def stylesheet() -> str:
     ink, panel, panel_hi = p["INK"], p["PANEL"], p["PANEL_HI"]
     line, text, dim = p["LINE"], p["TEXT"], p["TEXT_DIM"]
     select, on_select = p["SELECT"], p["ON_SELECT"]
+    alert = p["ALERT"]
+    alert_hi = mix(alert, "#FFFFFF", 0.18)
     amber, on_accent, hover = p["AMBER"], p["ON_ACCENT"], p["ACCENT_HOVER"]
     alert = p["ALERT"]
     return f"""
@@ -284,6 +286,16 @@ QPushButton:disabled {{ color: {dim}; border-color: {panel}; }}
 QPushButton#Primary {{ background: {amber}; color: {on_accent}; border: none; font-weight: 600; }}
 QPushButton#Primary:hover {{ background: {hover}; }}
 QPushButton#Primary:disabled {{ background: {line}; color: {dim}; }}
+/* Filled rather than outlined. An outline reads as one option among several;
+   deleting a 15 GB file that has to be downloaded again is not. */
+QPushButton#Destructive {{
+    background: {alert}; color: #FFFFFF; border: 1px solid {alert};
+    font-weight: 600;
+}}
+QPushButton#Destructive:hover {{ background: {alert_hi}; border-color: {alert_hi}; }}
+QPushButton#Destructive:disabled {{
+    background: {panel_hi}; color: {dim}; border-color: {line};
+}}
 QPushButton#Danger {{ border-color: {alert}; color: {alert}; }}
 QPushButton#Chip {{ padding: 4px 10px; border-radius: 12px; font-size: 12px; }}
 QPushButton#Chip:checked {{ background: {amber}; color: {on_accent}; border-color: {amber}; }}
