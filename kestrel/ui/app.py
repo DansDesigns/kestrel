@@ -42,7 +42,7 @@ from .settings import SettingsDialog
 from .splash import Splash
 from .widgets import (ActivityTree, ChatView, ContextGauge,
                       BusyOverlay, Field, IconTabBar, LazyTab, Readout,
-                      MonitorStrip, TypingIndicator, clear_font_cache,
+                      DownloadBar, MonitorStrip, TypingIndicator, clear_font_cache,
                       install_wheel_guard, mono_font, stretch_columns)
 
 
@@ -68,6 +68,8 @@ class AgentWorker(QObject):
     agentSwitched = Signal(str, list)
     delegating = Signal(str, str)
     delegated = Signal(str, str)
+    note = Signal(str)          # a line for the status bar, from this thread
+    prompting = Signal(int)     # reading the prompt, before any token arrives
 
     def __init__(self, cfg: Config, progress=None):
         super().__init__()
@@ -135,7 +137,11 @@ class AgentWorker(QObject):
     def forget_project(self) -> None:
         if self.agent:
             count = self.agent.forget_project_memories()
-            self.statusLine.emit(f"Cleared {count} project memory(ies)")
+            # The worker has no statusLine; it says things through its own
+            # signal, which the window connects. Reaching for one that does not
+            # exist crashed the thread rather than the call.
+            self.note.emit(f"Cleared {count} project memory(ies)"
+                           if count else "No project memories to clear")
 
     def set_paused(self, paused: bool) -> None:
         if self.agent:
@@ -159,8 +165,12 @@ class AgentWorker(QObject):
             self.assistantDone.emit(data["text"])
         elif kind == "context":
             self.contextUpdate.emit(data["usage"], data["budget"], data["compactions"])
+        elif kind == "prompting":
+            self.prompting.emit(int(data.get("tokens") or 0))
         elif kind == "gen":
             self.genStats.emit(data["tps"], data["tokens"])
+            if data.get("speed"):
+                self.note.emit(data["speed"])
         elif kind == "step":
             self.stepped.emit(data["step"], data["max"])
         elif kind == "thinking":
@@ -732,6 +742,9 @@ class MainWindow(QWidget):
         self._persona_window = None
         self.prompt_panel = None
         self._last_prompt = ""
+        self._last_gen = (0, 0.0)
+        self._exact_rate = 0.0
+        self._live_rate = 0.0
         self._tool_list: list[dict] = []
         self._gen_start = None
         self._gen_last = 0.0
@@ -751,6 +764,7 @@ class MainWindow(QWidget):
         self.monitor_timer = QTimer(self)
         self.monitor_timer.setInterval(2000)
         self.monitor_timer.timeout.connect(self.monitor_strip.refresh)
+        self.monitor_timer.timeout.connect(lambda: self.download_bar.refresh())
         self.monitor_timer.start()
         self.monitor_strip.refresh()
         self.log = QPlainTextEdit()
@@ -899,6 +913,15 @@ class MainWindow(QWidget):
         self.input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.input.document().documentLayout().documentSizeChanged.connect(
             lambda *_: self._fit_input())
+        # Sized now as well as on every change. The layout signal only fires
+        # when the document changes, so an empty box kept whatever height the
+        # widget was born with until the first keystroke shrank it.
+        #
+        # Measured again once the event loop turns: at build time the
+        # stylesheet has not been applied, so the font is not yet the one the
+        # text will be drawn in and the first measurement comes out short.
+        self._fit_input()
+        QTimer.singleShot(0, self._fit_input)
         clay.addWidget(self.input)
 
         # Only the two actions that belong to the message itself stay here; the
@@ -1009,10 +1032,32 @@ class MainWindow(QWidget):
         right.tabBar().tabBarClicked.connect(
             lambda i: self._tab_clicked("right", i))
         outer.addWidget(splitter, 1)
-        outer.addWidget(self.gauge)
-        # Under the gauge, in space that was empty. The gauge itself is not
-        # moved or resized: it is the thing people actually watch.
-        outer.addWidget(self.monitor_strip)
+        # The three strips are one block with no spacing between them, so a
+        # hidden one leaves nothing behind. Spacing between siblings is what
+        # kept a gap where the download bar had been.
+        self.bottom = QWidget()
+        bottom_lay = QVBoxLayout(self.bottom)
+        bottom_lay.setContentsMargins(0, 0, 0, 0)
+        bottom_lay.setSpacing(2)
+        bottom_lay.addWidget(self.gauge)
+        self.download_bar = DownloadBar(lambda: getattr(self, "downloads", None))
+        bottom_lay.addWidget(self.download_bar)
+        bottom_lay.addWidget(self.monitor_strip)
+        outer.addWidget(self.bottom)
+
+        # Wired here, where both strips exist. Restoring the fold from the top
+        # bar reached for a widget the bottom had not built yet.
+        self.monitor_strip.setCursor(Qt.PointingHandCursor)
+        self.monitor_strip.mousePressEvent = lambda _e: self.toggle_bottom()
+        if getattr(self.cfg, "bottom_folded", False):
+            self.toggle_bottom(True)
+
+        # Clicking the gauge folds the block down to the monitors alone, for
+        # when the window is short and the conversation matters more than the
+        # budget.
+        self.gauge.setCursor(Qt.PointingHandCursor)
+        self.gauge.setToolTip("Context in use — click to fold this away")
+        self.gauge.mousePressEvent = lambda _e: self.toggle_bottom()
 
     @staticmethod
     def _default_size() -> tuple[int, int]:
@@ -1037,8 +1082,22 @@ class MainWindow(QWidget):
         mark.setObjectName("Wordmark")
         lay.addWidget(mark)
 
+        # Which model is loaded, permanently. It is the single most consulted
+        # fact in the window and it used to be visible only while a status
+        # message happened to be about it.
+        self.bar_model = QLabel("no model loaded…")
+        self.bar_model.setObjectName("BarModel")
+        self.bar_model.setToolTip("The model currently loaded — click to choose "
+                                  "another")
+        self.bar_model.setCursor(Qt.PointingHandCursor)
+        # Clickable, because it is the label people look at when they want to
+        # change the thing it names.
+        self.bar_model.mousePressEvent = lambda _e: self.show_models()
+        self.bar_model.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        lay.addWidget(self.bar_model)
+
         self.bar_status = QLabel("")
-        self.bar_status.setObjectName("Dim")
+        self.bar_status.setObjectName("BarStatus")
         self.bar_status.setMinimumWidth(0)
         self.bar_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(self.bar_status, 1)
@@ -1066,6 +1125,8 @@ class MainWindow(QWidget):
         self.theme_btn.clicked.connect(self.toggle_theme)
         lay.addWidget(self.theme_btn)
         self._label_theme_button()
+        self._name_model(self.cfg.model_path or "")
+
         return bar
 
     def _label_theme_button(self) -> None:
@@ -1327,6 +1388,12 @@ class MainWindow(QWidget):
                      "model to apply them")
         self.chat.add_note("Runtime settings reset. Reload the model for it to "
                            "take effect.", theme.AMBER)
+
+    @Slot(int)
+    def _prompting(self, tokens: int) -> None:
+        """Say that the prompt is being read, and how much of it there is."""
+        self.typing.set_label(f"reading the prompt — {tokens:,} tokens"
+                              if tokens else "reading the prompt")
 
     def _label_step(self, step: int, total: int) -> None:
         """Say where the work is, in the plan's terms.
@@ -1777,6 +1844,55 @@ class MainWindow(QWidget):
         self.restart_btn.clicked.connect(self.restart_server)
         lay.addWidget(_row(self.reconnect_btn, self.restart_btn))
 
+        # The three switches people reach for most, where the state they
+        # affect is already on screen.
+        self.think_box = QCheckBox("Thinking")
+        self.think_box.setChecked(self.cfg.thinking.enabled)
+        self.think_box.setToolTip("Let the model reason before answering. It "
+                                  "costs tokens and time; on a small window it "
+                                  "can cost more than it returns.")
+        self.think_box.toggled.connect(self._set_thinking)
+
+        self.canvas_box = QCheckBox("Canvas")
+        self.canvas_box.setChecked(self.cfg.canvas_forced)
+        self.canvas_box.setToolTip("Force the canvas: new code files must be "
+                                   "drafted there and saved from there, rather "
+                                   "than written straight to disk.")
+        self.canvas_box.toggled.connect(self._set_canvas_forced)
+
+        self.tts_box = QCheckBox("Speech")
+        self.tts_box.setChecked(self.cfg.speech.auto_speak)
+        self.tts_box.setToolTip("Read each reply aloud as it finishes.")
+        self.tts_box.toggled.connect(self._set_tts)
+        lay.addWidget(_row(self.think_box, self.canvas_box, self.tts_box))
+
+        # The three sampling profiles worth reaching for mid-conversation.
+        # "Precise" is called Coder here: that is what it is for, and a name
+        # that says the job is easier to choose than one that says the method.
+        self.preset_row = QHBoxLayout()
+        self.preset_buttons = {}
+        for label, name, tip in (
+                ("Coder", "precise",
+                 "Low temperature: code, edits, anything with one right answer"),
+                ("Balanced", "balanced", "The default"),
+                ("Creative", "creative",
+                 "Higher temperature: prose, ideas, variety")):
+            button = QPushButton(label)
+            button.setToolTip(tip)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.clicked.connect(lambda _=False, n=name, l=label:
+                                   self.use_preset(n, l))
+            self.preset_buttons[name] = button
+            self.preset_row.addWidget(button)
+        lay.addLayout(self.preset_row)
+        self._mark_preset()
+
+        self.reload_btn = QPushButton("Load the last model used")
+        self.reload_btn.setToolTip("Start the model that was loaded when "
+                                   "Kestrel last closed")
+        self.reload_btn.clicked.connect(self.load_last_model)
+        lay.addWidget(self.reload_btn)
+
         self.detail_box = QCheckBox("Show tool arguments and raw output")
         self.detail_box.setChecked(self.cfg.show_tool_detail)
         self.detail_box.setToolTip("Off: the transcript shows results only. "
@@ -1801,6 +1917,103 @@ class MainWindow(QWidget):
         lay.addWidget(note)
         lay.addStretch(1)
         return w
+
+    @Slot()
+    def load_last_model(self) -> None:
+        """Start whatever was loaded when Kestrel last closed.
+
+        The model is the one thing that has to be chosen before anything works,
+        and choosing the same one again is the common case. Kestrel remembers
+        which loaded successfully rather than which was merely selected.
+        """
+        path = (self.cfg.last_good_model or self.cfg.model_path or "").strip()
+        if not path:
+            self._status("No model has loaded yet — choose one in Models")
+            return
+        if not Path(path).exists():
+            self._status(f"{Path(path).name} is no longer at that path")
+            return
+        self._status(f"Loading {Path(path).name}…")
+        self.load_model(path)
+
+    def _mark_preset(self) -> None:
+        """Show which profile is in force, if it is one of these three."""
+        current = getattr(self.cfg.sampling, "last_preset", "")
+        for name, button in getattr(self, "preset_buttons", {}).items():
+            button.setObjectName("PresetOn" if name == current else "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def use_preset(self, name: str, label: str = "") -> None:
+        """Apply a sampling profile without leaving the page."""
+        self.cfg.sampling.preset(name)
+        self.cfg.save()
+        self._mark_preset()
+        self._with("params_panel", lambda p: p.refresh_sampling())
+        self._status(f"{label or name.capitalize()} sampling — applies to the "
+                     "next message, no reload needed")
+
+    def _name_model(self, path: str) -> None:
+        """Put the loaded model's name in the bar, and its path in the tooltip."""
+        name = Path(path).name if path else ""
+        self.bar_model.setText(name or "no model loaded…")
+        self.bar_model.setToolTip(str(path) or "The model currently loaded")
+
+    def toggle_bottom(self, folded: bool | None = None) -> None:
+        """Fold the bottom block down to the system monitors, or back."""
+        self._bottom_folded = (not getattr(self, "_bottom_folded", False)
+                               if folded is None else bool(folded))
+        self.gauge.setVisible(not self._bottom_folded)
+        if getattr(self, "download_bar", None) is not None:
+            self.download_bar.refresh()
+        self.monitor_strip.setToolTip(
+            "Click the monitors to bring the context gauge back"
+            if self._bottom_folded else "")
+        self.cfg.bottom_folded = self._bottom_folded
+        self.cfg.save()
+
+    def show_models(self) -> None:
+        """Show the model list, or put it away if it is already showing.
+
+        The same behaviour as the rail icons: pressing the thing that opened a
+        panel closes it again. A label that only ever opens leaves the panel to
+        be dismissed some other way, which is one rule for the icons and
+        another for this.
+        """
+        names = [self.left_panel.tabToolTip(i)
+                 for i in range(self.left_panel.count())]
+        if "Models" not in names:
+            return
+        wanted = names.index("Models")
+        showing = (not self._collapsed.get("left")
+                   and self.left_panel.currentIndex() == wanted)
+        if showing:
+            self._toggle_panel("left", self.left_panel, False)
+            return
+        if self._collapsed.get("left"):
+            # Opened as well as selected: a collapsed rail would otherwise
+            # switch to a tab nobody can see.
+            self._toggle_panel("left", self.left_panel, True)
+        self.left_panel.setCurrentIndex(wanted)
+
+    def _set_thinking(self, on: bool) -> None:
+        # "auto" leaves it to the model, which is not the same as forcing it on
+        # — a model that does not reason should not be made to pretend.
+        self.cfg.thinking.mode = "auto" if on else "off"
+        self.cfg.save()
+        self._status(f"Thinking {'on' if on else 'off'} — from the next message")
+
+    def _set_canvas_forced(self, on: bool) -> None:
+        self.cfg.canvas_forced = bool(on)
+        self.cfg.save()
+        self._status("New files go through the canvas" if on else
+                     "write_file may create files directly")
+
+    def _set_tts(self, on: bool) -> None:
+        self.cfg.speech.auto_speak = bool(on)
+        self.cfg.save()
+        self._with("speech_panel", lambda p: p.refresh())
+        self._status(f"Speech {'on' if on else 'off'}")
 
     def _set_tool_detail(self, on: bool) -> None:
         self.cfg.show_tool_detail = on
@@ -1829,7 +2042,7 @@ class MainWindow(QWidget):
         self.worker.failed.connect(self.on_failed)
         self.worker.token.connect(self.chat.stream)
         self.worker.token.connect(self._count_token)
-        self.worker.token.connect(lambda _t: self.typing.set_label("writing"))
+        self.worker.token.connect(lambda _t: self.typing.set_label("replying"))
         self.worker.token.connect(self._speak_chunk)
         self.worker.thinking.connect(lambda _t: self.typing.set_label("reasoning"))
         # Reasoning tokens are tokens: the rate should not read zero through
@@ -1850,6 +2063,8 @@ class MainWindow(QWidget):
         self.worker.memoryRecall.connect(self.on_memory_recall)
         self.worker.memorySaved.connect(self.on_memory_saved)
         self.worker.todoUpdate.connect(self.plan_panel.update_todo)
+        self.worker.note.connect(self._status)
+        self.worker.prompting.connect(self._prompting)
         self.worker.delegating.connect(self._delegating)
         self.worker.delegated.connect(self._delegated)
         self.plan_panel.pauseToggled.connect(self.worker.set_paused)
@@ -1944,7 +2159,13 @@ class MainWindow(QWidget):
 
     @Slot(str)
     def on_assistant(self, text: str) -> None:
-        self.chat.end_assistant(text)
+        # The last generation's figures belong to this reply: it is the call
+        # that produced it.
+        tokens, seconds = getattr(self, "_last_gen", (0, 0.0))
+        self.chat.end_assistant(text, tokens=tokens, seconds=seconds)
+        self._last_gen = (0, 0.0)
+        self._exact_rate = 0.0
+        self._live_rate = 0.0
         agent = self.worker.agent
         self._reply_no += 1
         self._replies[self._reply_no] = {
@@ -1983,13 +2204,21 @@ class MainWindow(QWidget):
             return
         elapsed = now - self._gen_start
         if elapsed > 0.3:
+            # A live estimate while tokens arrive, so the figure is not blank
+            # for the length of a reply. It is replaced by the server's own
+            # measurement when the turn ends: two numbers that disagree is
+            # worse than one that is late.
             rate = self._gen_tokens / elapsed
-            self.gauge.set_rate(rate)
-            self.r_speed.set(f"{rate:.1f} tok/s")
+            self._live_rate = rate
+            if not self._exact_rate:
+                self.gauge.set_rate(rate)
+                self.r_speed.set(f"{rate:.1f} tok/s")
 
     @Slot(float, int)
     def on_gen(self, tps: float, tokens: int) -> None:
+        """The authoritative rate, from the server's own timings."""
         if tps > 0:
+            self._exact_rate = tps
             self.r_speed.set(f"{tps:.1f} tok/s")
             self.gauge.set_rate(tps)
 
@@ -2242,6 +2471,7 @@ class MainWindow(QWidget):
                     self.chat.add_note(LAST_CAP[-1] + ".", theme.AMBER)
                     LAST_CAP.clear()
                 self.remember_profile(path)
+                self._name_model(path)
                 self.cfg.last_good_model = str(path)
                 self.cfg.save()
                 self.statusReady.emit(f"Loaded {Path(path).name}")
@@ -2795,6 +3025,7 @@ class MainWindow(QWidget):
             self.clear_attachments()
         agent = self.worker.agent
         self._pending_prompt = text
+        self._exact_rate = 0.0
         self._pending_mark = len(agent.history) if agent is not None else 0
         self.chat.add_user(text)
         self.chat.begin_assistant()

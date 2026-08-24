@@ -119,7 +119,7 @@ class Registry:
         folder — but it does not need every parameter of every tool in front of
         it to know what is available.
         """
-        if verbosity <= 0:
+        if verbosity <= 99:
             # Only what is needed to find the rest. A model cannot call a tool
             # it has never heard of, so these four have to be named — but the
             # other twenty do not, and naming them costs their tokens on every
@@ -248,7 +248,9 @@ def build_registry(cfg, skills_provider, approver=None, memory_provider=None,
                  tool_help, DANGER_SAFE,
                  detail="Only the names are listed when the context is small. "
                         "Read a tool's arguments here before calling it."))
-    files.register(reg, ws)
+    files.register(reg, ws,
+                   forced=lambda: bool(getattr(cfg, "canvas_forced", True)
+                                       and getattr(cfg, "canvas_enabled", True)))
     shell.register(reg, ws)
     skillset.register(reg, skills_provider)
     if getattr(cfg, "canvas_enabled", True):

@@ -309,7 +309,10 @@ which also protects a palette change made mid-reply.
 transcript when something has gone wrong and the least interesting when it has
 not, so it shows its opening with the whole of it one click away.
 
-The composer is one line to start with and grows with what is typed, to a
+The composer is one line from the first frame — sized when it is built and
+again once the event loop turns, because at build time the stylesheet has not
+been applied and the font it measures is not the one the text will be drawn in.
+It grows with what is typed, to a
 maximum of eight. A box that opens four lines tall implies a paragraph is
 wanted, when most messages are a sentence; past eight it is a document, and
 taking the window for it would push away the conversation being replied to.
@@ -418,6 +421,39 @@ instruction that changes what the model does rather than how it says it:
 
 Dropping it on a small window is how a file ends up pasted into a reply, where
 it cannot be edited, run or saved.
+
+**Load the last model used** starts whatever was running when Kestrel last
+closed. It remembers the model that *loaded successfully*, not the one that was
+merely selected, and says plainly when there is none yet or when the file has
+moved.
+
+The one in force is held down in the accent colour. Without that the three
+buttons look like actions rather than a choice, and nothing on the page says
+which is running.
+
+**Coder · Balanced · Creative** are the sampling profiles worth reaching for
+mid-conversation, on the page where you are already watching the model behave.
+Precise is called Coder here because that is what it is for, and a name that
+says the job is easier to choose than one that says the method. The Params page
+follows along rather than showing the numbers from before.
+
+Three switches sit at the bottom of the Status tab, where the state they affect
+is already on screen: **Thinking**, **Canvas** and **Speech**. Thinking off sets
+the mode to `off`; on returns it to `auto`, which leaves the decision to the
+model rather than forcing a model that does not reason to pretend.
+
+**write_file refuses to create new code**, unless the Canvas switch is off. Telling a model to use the canvas did
+not work across several attempts, and a rule the harness does not enforce is a
+suggestion. Writing a new code file straight to disk now comes back as:
+
+> Not written. New files are made in the canvas first:
+> `canvas_write(text="…", language="py")`, then `canvas_save(path="main.py")`
+
+Short notes, existing files and anything already in the canvas go through
+untouched — the refusal is narrow, aimed at the one case where a file would
+otherwise be finished on disk before the person watching had seen a line of it.
+A refusal lands where a small model is actually paying attention; an instruction
+in the prompt competes with everything else there.
 
 **Code in a reply is moved to the canvas.** Telling a model where to put code
 only works when it listens, and some do not — leaving a wall of source in the
@@ -807,8 +843,12 @@ conversation, a place work can be handed to.
 
 A persona belongs to whoever is wearing it, so there is no separate Persona tab:
 each role picks one in the **Agents** tab, or none, and **Personas…** there opens
-the editor for writing and importing them. A role with no persona is just the
-job. Each role also carries a short
+the editor for writing and importing them. A role with no persona is just the job.
+
+The list is rebuilt each time an agent is selected, not once at startup — a
+persona written while the window is open would otherwise never appear, and the
+only sign would be an empty list nobody can explain. **Choose a file…** picks
+one from anywhere, which removes discovery as a failure mode entirely. Each role also carries a short
 brief — what the job is, not what the character is like, which is the persona's
 business.
 
@@ -912,8 +952,12 @@ heard of, which is the one thing a folder path cannot fix. The other twenty do
 not. `TOOLS.md` and `SKILLS.md` are written into the config folder on startup
 with the full detail of both, for the model to read and for a person to browse.
 
-The whole system prompt at 4,096 tokens is **245 tokens** with 24 tools and 61
-skills installed.
+This applies at every context size, not only small ones. There is no budget at
+which listing them earns the tokens: a description is a summary of instructions
+the model can read, `skill_find` searches those descriptions properly, and the
+catalogue is on disk for both of you. With 24 tools and 61 skills installed the
+whole system prompt is **245 tokens** at 4k and **498** at 32k — where it was
+1,252 when the listings were still being written out in full.
 
 ### 8g. The tool listing shrinks with the window
 
@@ -1493,6 +1537,26 @@ gives its width to the transcript; clicking again restores it to the width it
 had. The whole strip is the target rather than a small button, and the chevron
 points the way the panel will move.
 
+The indicator names the phase as it happens: **reading the prompt — 2,290
+tokens**, then **reasoning** if the model thinks, then **replying** once the
+first token arrives, then **running read_file** while a tool works. Between
+sending and the first token the machine is working hard and the interface used
+to say nothing about it, which on a long prompt is a minute of apparent silence
+— and silence is what makes people restart things that were working.
+
+While tokens arrive the rate is estimated from the clock, so the figure is not
+blank for the length of a reply; when the turn ends the server's own measurement
+replaces it. Two numbers that disagree is worse than one that is late — which is
+what the status bar and the gauge were doing, 4.8 against 5.8 for the same
+reply.
+
+Both phases are reported when the server gives them: `prompt 38 tok/s ·
+generation 3.7 tok/s`. They are different operations, not a slowdown. The prompt
+is processed in batches — many tokens through the model at once, limited by
+arithmetic — while generation produces one token at a time, each pass reading
+the whole active model from memory before the next can start. A tenfold gap is
+the normal shape of that on hardware where memory bandwidth is the constraint.
+
 The generation rate is labelled `gen tok/s`, because llama.cpp's own log reports
 prompt-processing speed in the same unit and the two differ by an order of
 magnitude — 26 against 0.7 on a loaded laptop. A bare figure invites the reading
@@ -1563,6 +1627,28 @@ pulsing indicator reports what is happening: *thinking*, *reasoning*, *running
 grep*, *writing*. Start-up narrates itself the same way, over a splash, because
 opening the application means scanning model directories, reading skill folders
 and probing speech engines — some of which shell out to other programs.
+
+**Stop is immediate.** Cancelling used to set a flag, which stopped Kestrel
+reading while llama-server carried on generating the reply it had been told to
+abandon — the machine at full tilt for however long the answer would have taken.
+The socket is now shut instead, which interrupts a read already in progress and
+ends the generation server-side. Measured against a slow stream: **7.3 seconds
+to 1.0**, with `abort()` itself returning in under a millisecond.
+
+Closing the response is not enough on its own — `close()` drains what is still
+coming before it returns, which is the exact wait being cancelled.
+
+The loaded model has its own boxed label beside the wordmark, always visible,
+with the full path in its
+tooltip, and clicking it shows the Models tab — or puts it away again if it is already
+showing, the same as pressing a rail icon twice. A label that only ever opened
+would leave the panel to be dismissed some other way, which is one rule for the
+icons and another for this — opening the rail first if it is
+collapsed, since selecting a tab nobody can see is not much help. It reads "no
+model loaded…" when there is none. It used to appear only while a status message
+happened to mention it — which is a poor way to carry the single most consulted
+fact in the window. The status text sits to its right, in a lighter weight, so a
+glance tells the fixed label from the passing commentary.
 
 **Top bar.** Present on every page, above the tab stack rather than inside it:
 the wordmark, a status line, and the actions that belong to the session as a
@@ -1671,10 +1757,41 @@ Linux from `/sys/class/drm`. Sampling happens on a background thread: reading
 those counters spawns a process and takes the better part of a second, which is
 not something to make the interface wait for.
 
+**A download strip** sits between the gauge and the monitors, in space that was
+already empty — neither moves. The gauge, the download strip and the monitors are one block with no spacing
+between them, so a hidden strip leaves nothing behind — spacing between siblings
+is what kept a gap where the download bar had been. Clicking the gauge folds the
+block down to the monitors alone and gives the 64 pixels to the conversation;
+clicking the monitors brings it back, and the choice is remembered.
+
+The download strip takes no height at all when nothing is downloading — a hidden widget with a
+fixed height still holds its row, leaving the window a line short for no visible
+reason. It shows each active transfer as a bar with
+its name and progress written beside it, not over it — pale text on a filling
+bar is unreadable at exactly the moment it matters — and hides when there are
+none. Downloads happen in their own window, which is
+usually closed, and a 15 GB file arriving with no sign of it in the main window
+is how people conclude nothing is happening and start it again.
+
+**Every block says what it cost.** A reasoning trace carries its tokens, the
+time it took and the rate; a reply carries the same on the row that already has
+retry and copy. On a machine where a reply can take a minute, "was that slow
+because of the model or because it thought for forty seconds" is the question
+being asked, and it is answerable at a glance rather than by watching.
+
 **The bottom strip** shows CPU, RAM, GPU, video memory and temperatures under
 the context gauge, in space that was empty — the gauge itself is neither moved
 nor resized. CPU temperature comes from the platform where it offers one; Windows
 generally does not without a driver, so it is left out there rather than guessed.
+
+A row painted by hand — a wrapped plan step — must use the theme's colour
+rather than the widget palette. Painting steps around the stylesheet, and Qt's
+default palette text is a mid grey that is hard to read on a light background,
+which is why wrapped rows looked washed out while short ones did not.
+
+Sub-steps are set part of the way towards the dim colour rather than to it, so
+the hierarchy still reads without the text becoming pale: 10.3:1 in light,
+8.6:1 in dark.
 
 **Contrast.** Dimmed text sits at better than 6:1 against its background in both
 palettes, and a selected row has its own background *and* its own text colour —

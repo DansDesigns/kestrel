@@ -41,7 +41,11 @@ CODE_SUFFIXES = {".py", ".js", ".ts", ".rs", ".go", ".c", ".h", ".cpp",
                  ".java", ".rb", ".sh", ".sql", ".css", ".html", ".jsx", ".md"}
 
 
-def register(reg, workspace: Path) -> None:
+def register(reg, workspace: Path, forced=None) -> None:
+    # Whether the canvas is required for new code files. A switch rather than a
+    # constant, because a rule that cannot be turned off becomes something to
+    # work around rather than something to follow.
+    forced = forced or (lambda: True)
     sb = Sandbox(workspace)
 
     def list_dir(path: str = ".") -> ToolResult:
@@ -82,6 +86,24 @@ def register(reg, workspace: Path) -> None:
 
     def write_file(path: str, content: str) -> ToolResult:
         f = sb.resolve(path)
+
+        # Refused for new code, rather than mirrored afterwards. Telling a
+        # model to use the canvas has not worked across several attempts, and a
+        # rule the harness does not enforce is a suggestion. The canvas is
+        # where a file can be read, edited and re-saved by the person watching;
+        # a file written straight to disk is finished before they see it.
+        lines = content.count("\n") + 1
+        if (forced() and f.suffix.lower() in CODE_SUFFIXES and lines >= 4
+                and not f.exists()
+                and content.strip() not in BUFFER.text):
+            return ToolResult(
+                f"Not written. New files are made in the canvas first:\n"
+                f'  canvas_write(text="…", language="{f.suffix.lstrip(".")}")\n'
+                f'  canvas_save(path="{sb.rel(f)}")\n'
+                "The canvas is on screen, so the user can read and correct it "
+                "while you work. Use edit_file for changes to a file that "
+                "already exists.", ok=False)
+
         f.parent.mkdir(parents=True, exist_ok=True)
         existed = f.exists()
         f.write_text(content, "utf-8")

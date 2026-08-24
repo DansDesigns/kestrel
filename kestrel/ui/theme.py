@@ -213,10 +213,10 @@ def stylesheet() -> str:
     ink, panel, panel_hi = p["INK"], p["PANEL"], p["PANEL_HI"]
     line, text, dim = p["LINE"], p["TEXT"], p["TEXT_DIM"]
     select, on_select = p["SELECT"], p["ON_SELECT"]
-    alert = p["ALERT"]
-    alert_hi = mix(alert, "#FFFFFF", 0.18)
     amber, on_accent, hover = p["AMBER"], p["ON_ACCENT"], p["ACCENT_HOVER"]
     alert = p["ALERT"]
+    alert_hi = mix(alert, "#FFFFFF", 0.18)
+    accent_hi = hover
     return f"""
 QWidget {{
     background: {ink};
@@ -228,6 +228,13 @@ QMainWindow::separator {{ background: {line}; width: 1px; height: 1px; }}
 
 QFrame#Panel, QWidget#Panel {{ background: {panel}; border: 1px solid {line}; border-radius: 6px; }}
 QWidget#TopBar {{ background: {panel}; border-bottom: 1px solid {line}; }}
+/* The model name reads as a fixed label, the status beside it as passing
+   commentary — different weights so a glance can tell them apart. */
+QLabel#BarModel {{
+    color: {text}; font-weight: 600; padding: 3px 12px;
+    background: {panel_hi}; border: 1px solid {line}; border-radius: 5px;
+}}
+QLabel#BarStatus {{ color: {dim}; padding: 3px 14px; }}
 QLabel#Wordmark {{ font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }}
 
 QScrollArea {{ border: none; }}
@@ -297,6 +304,14 @@ QPushButton#Destructive:disabled {{
     background: {panel_hi}; color: {dim}; border-color: {line};
 }}
 QPushButton#Danger {{ border-color: {alert}; color: {alert}; }}
+/* The chosen sampling profile, held down. Without it the three buttons look
+   like actions rather than a choice, and nothing on the page says which is in
+   force. */
+QPushButton#PresetOn {{
+    background: {amber}; color: {on_accent}; border: 1px solid {amber};
+    font-weight: 600;
+}}
+QPushButton#PresetOn:hover {{ background: {accent_hi}; border-color: {accent_hi}; }}
 QPushButton#Chip {{ padding: 4px 10px; border-radius: 12px; font-size: 12px; }}
 QPushButton#Chip:checked {{ background: {amber}; color: {on_accent}; border-color: {amber}; }}
 

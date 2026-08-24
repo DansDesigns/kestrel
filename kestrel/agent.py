@@ -842,6 +842,12 @@ class Agent:
     def cancel(self) -> None:
         self.cancelled.set()
         self.paused.clear()
+        # The flag stops the loop between steps; this stops the generation
+        # that is happening right now.
+        try:
+            self.client.abort()
+        except Exception:
+            pass
 
     def pause(self) -> None:
         self.paused.set()
@@ -876,6 +882,10 @@ class Agent:
         assert self.registry is not None and self.ctx is not None
 
         self.cancelled.clear()
+        try:
+            self.client.resume_after_abort()
+        except Exception:
+            pass
         # Kept as given: a list of parts is what llama.cpp expects for a
         # message with images, and flattening it to text loses the pictures.
         readable = self._as_text(user_text)
@@ -948,6 +958,11 @@ class Agent:
             tools = self.registry.schemas() if self.dialect == "native" else None
             stop = [prompts.TOOL_BLOCK_CLOSE] if self.dialect == "text" else None
             self.emit("step", {"step": step, "max": self.cfg.max_steps})
+            # Between sending and the first token the machine is working hard
+            # and the interface said nothing about it — on a long prompt that is
+            # a minute of apparent silence.
+            self.emit("prompting", {
+                "tokens": self.counter.count_messages(messages)})
 
             try:
                 res: ChatResult = self.client.chat(
@@ -963,7 +978,10 @@ class Agent:
                 self.emit("error", {"message": str(e)})
                 return f"The model endpoint failed: {e}"
 
-            self.emit("gen", {"tps": res.tokens_per_sec, "tokens": res.completion_tokens})
+            self.emit("gen", {"tps": res.tokens_per_sec,
+                              "tokens": res.completion_tokens,
+                              "prompt_tps": res.prompt_per_sec,
+                              "speed": res.speed_line})
 
             content, trace = reasoning.merge(res)
             res.content = content

@@ -818,13 +818,21 @@ class ParamsPanel(QWidget):
 
     def _preset(self, name: str) -> None:
         self.cfg.sampling.preset(name)
+        self.refresh_sampling()
+        self.apply()
+
+    def refresh_sampling(self) -> None:
+        """Put the fields back in step with the settings.
+
+        Called after a preset is applied from elsewhere — the Status shortcuts —
+        so this page does not go on showing the numbers from before.
+        """
         s = self.cfg.sampling
         self.temp.setValue(s.temperature)
         self.top_k.setValue(s.top_k)
         self.top_p.setValue(s.top_p)
         self.min_p.setValue(s.min_p)
         self.rep.setValue(s.repeat_penalty)
-        self.apply()
 
     def apply(self) -> None:
         s, t = self.cfg.sampling, self.cfg.thinking
@@ -1377,7 +1385,11 @@ class PlanPanel(QWidget):
                                    + (f"  — {item.note}" if item.note else "")])
             row.setData(0, Qt.UserRole, item.id)
             if depth:
-                row.setForeground(1, QColor(theme.TEXT_DIM))
+                # Dimmed, but not pale: a sub-step is secondary to its stage,
+                # not decoration. Halfway to the dim colour keeps the hierarchy
+                # legible without making the text hard to read.
+                row.setForeground(1, QColor(theme.mix(theme.TEXT,
+                                                      theme.TEXT_DIM, 0.45)))
             # The mark belongs beside the first line of a wrapped step, not
             # floating in the middle of the space the text needs.
             row.setTextAlignment(0, Qt.AlignTop | Qt.AlignHCenter)
@@ -2844,12 +2856,21 @@ class AgentsPanel(QWidget):
         return self.roster.get(item.data(0, Qt.UserRole))
 
     def _fill_personas(self) -> None:
+        agent = self._selected()
+        chosen = agent.persona_file if agent else ""
         self.persona_box.blockSignals(True)
         self.persona_box.clear()
         self.persona_box.addItem("none — just the role", "")
+        seen = set()
         for found in personamod.discover(
                 personamod.default_persona_dirs(config_dir(), self.cfg.workspace)):
             self.persona_box.addItem(found.name, str(found.path))
+            seen.add(str(found.path))
+        # One this agent already uses that lives outside the search paths:
+        # keep it in the list rather than silently dropping the setting.
+        if chosen and chosen not in seen:
+            self.persona_box.addItem(Path(chosen).stem, chosen)
+        self.persona_box.addItem("Choose a file…", "__browse__")
         self.persona_box.blockSignals(False)
 
     def _persona_chosen(self, _index: int) -> None:
@@ -2857,6 +2878,21 @@ class AgentsPanel(QWidget):
         if agent is None or self.roster is None:
             return
         chosen = self.persona_box.currentData() or ""
+        if chosen == "__browse__":
+            picked, _ = QFileDialog.getOpenFileName(
+                self, "Persona file", str(Path.home()),
+                "Persona (*.md *.txt);;All files (*)")
+            self._fill_personas()
+            if not picked:
+                return
+            chosen = picked
+            index = self.persona_box.findData(chosen)
+            if index < 0:
+                self.persona_box.addItem(Path(chosen).stem, chosen)
+                index = self.persona_box.count() - 1
+            self.persona_box.blockSignals(True)
+            self.persona_box.setCurrentIndex(index)
+            self.persona_box.blockSignals(False)
         if chosen == agent.persona_file:
             return
         agent.persona_file = chosen
@@ -2872,8 +2908,10 @@ class AgentsPanel(QWidget):
             self.detail.setText("")
             return
         self.detail.setText(f"{agent.name} — {agent.summary()}\n{agent.speciality}")
-        if self.persona_box.count() <= 1:
-            self._fill_personas()
+        # Refilled every time, not once: a persona written after the panel was
+        # built would otherwise never appear, and the only sign would be an
+        # empty list nobody can explain.
+        self._fill_personas()
         index = self.persona_box.findData(agent.persona_file or "")
         self.persona_box.blockSignals(True)
         self.persona_box.setCurrentIndex(max(0, index))

@@ -204,9 +204,14 @@ class Sampling:
             d["seed"] = self.seed
         return d
 
+    last_preset: str = ""           # which named profile is in force, if any
+
     def preset(self, name: str) -> None:
         """Reasonable starting points, since raw sampler defaults suit
         creative writing more than tool use."""
+        # Recorded so the interface can show which is in force: three buttons
+        # with none of them held down look like actions rather than a choice.
+        self.last_preset = name
         if name == "precise":
             self.temperature, self.top_p, self.top_k, self.min_p = 0.15, 0.9, 20, 0.05
             self.repeat_penalty = 1.05

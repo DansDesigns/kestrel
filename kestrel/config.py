@@ -139,6 +139,7 @@ class Config:
     show_tool_detail: bool = False    # show arguments and raw output in the transcript
     favourite_models: list[str] = field(default_factory=list)
     canvas_enabled: bool = True       # give the model the shared code canvas
+    canvas_forced: bool = True        # refuse write_file for new code files
     team_enabled: bool = True         # several agents sharing one model
     minimal_prompt: bool = False      # strip everything optional, for diagnosis
     plan_pointer_only: bool = True    # send a summary, not the whole checklist
@@ -152,6 +153,7 @@ class Config:
     rpc_port: int = 50052             # where rpc-server listens
     beacon_port: int = 50051          # where the announcement goes
     node_label: str = ""              # blank uses the hostname
+    bottom_folded: bool = False       # show only the system monitors
     model_vision: bool = False        # the loaded model accepts images
     ui_font: str = ""                 # blank follows the platform default
     mono_font: str = ""

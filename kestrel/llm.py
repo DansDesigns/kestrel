@@ -8,6 +8,7 @@ degrades quietly when they aren't.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -30,11 +31,31 @@ class ChatResult:
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # llama.cpp reports the two phases separately, and they are different
+    # things: the prompt is processed in batches, many tokens at once, while
+    # generation produces one token at a time and waits on memory each time.
+    # Ten times slower is the normal shape of that, not a fault.
+    prompt_per_sec: float = 0.0
+    gen_per_sec: float = 0.0
     elapsed: float = 0.0
 
     @property
     def tokens_per_sec(self) -> float:
+        if self.gen_per_sec:
+            return self.gen_per_sec
         return self.completion_tokens / self.elapsed if self.elapsed > 0 else 0.0
+
+    @property
+    def speed_line(self) -> str:
+        """Both phases, when the server reported them."""
+        if not (self.prompt_per_sec or self.gen_per_sec):
+            return ""
+        bits = []
+        if self.prompt_per_sec:
+            bits.append(f"prompt {self.prompt_per_sec:.0f} tok/s")
+        if self.gen_per_sec:
+            bits.append(f"generation {self.gen_per_sec:.1f} tok/s")
+        return " · ".join(bits)
 
 
 def _sse_lines(response, chunk_size: int = 8192):
@@ -55,7 +76,11 @@ def _sse_lines(response, chunk_size: int = 8192):
 
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
-    for chunk in response.iter_content(chunk_size=chunk_size):
+    try:
+        iterator = response.iter_content(chunk_size=chunk_size)
+    except Exception:
+        return
+    for chunk in _safe_chunks(iterator):
         if not chunk:
             continue
         buffer += decoder.decode(chunk)
@@ -73,9 +98,15 @@ def _sse_lines(response, chunk_size: int = 8192):
 
 class LlamaClient:
     def __init__(self, base_url: str, api_key: str = "", timeout: float = 900.0):
+        self._stopped = False
         self.base = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # The response currently streaming, so it can be cut off. Setting a
+        # flag only stops Kestrel reading; the server carries on generating
+        # until the connection closes, which is why Stop used to take as long
+        # as the reply would have.
+        self._active = None
         self.session = requests.Session()
         self._props: dict | None = None
         self._tool_support: bool | None = None
@@ -212,6 +243,44 @@ class LlamaClient:
         return ok
 
     # -- generation -----------------------------------------------------------
+    def abort(self) -> None:
+        """Cut off whatever is streaming, now.
+
+        Closing the response ends the HTTP connection, and llama-server stops
+        generating when the client goes away. Without this, Stop only stopped
+        the interface listening — the machine kept working at full tilt until
+        the reply it had been told to abandon had finished.
+        """
+        self._stopped = True
+        response, self._active = self._active, None
+        if response is None:
+            return
+        # `close()` on a streaming response drains what is still coming before
+        # it returns, which on a slow model is the whole reply — the very wait
+        # this is meant to end. The socket underneath is shut instead, and the
+        # reader gets an exception it expects.
+        # Shutting the socket is what interrupts a read already in progress.
+        # Closing the file objects above it waits for that read to finish
+        # first, which is the wait being cancelled.
+        try:
+            sock = response.raw._fp.fp.raw._sock
+        except Exception:
+            sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for shut in (lambda: response.raw.close(), lambda: response.close()):
+            try:
+                shut()
+            except Exception:
+                continue
+
+    def resume_after_abort(self) -> None:
+        """Ready for the next turn."""
+        self._stopped = False
+
     def chat(
         self,
         messages: list[dict],
@@ -275,6 +344,7 @@ class LlamaClient:
             choice = (body.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
             usage = body.get("usage") or {}
+            timed = body.get("timings") or {}
             return ChatResult(
                 content=msg.get("content") or "",
                 reasoning=msg.get("reasoning_content") or msg.get("reasoning") or "",
@@ -282,16 +352,22 @@ class LlamaClient:
                 finish_reason=choice.get("finish_reason") or "",
                 prompt_tokens=int(usage.get("prompt_tokens") or 0),
                 completion_tokens=int(usage.get("completion_tokens") or 0),
+                prompt_per_sec=float(timed.get("prompt_per_second") or 0.0),
+                gen_per_sec=float(timed.get("predicted_per_second") or 0.0),
                 elapsed=time.time() - started,
             )
 
         content: list[str] = []
         reasoning: list[str] = []
+        timings: dict = {}
         splitter = reasoningmod.StreamSplitter()
         calls: dict[int, dict] = {}
         finish = ""
         usage: dict = {}
+        self._active = r
         for raw in _sse_lines(r):
+            if self._stopped:
+                break
             if cancel is not None and cancel():
                 try:
                     r.close()
@@ -311,6 +387,8 @@ class LlamaClient:
                 continue
             if obj.get("usage"):
                 usage = obj["usage"]
+            if obj.get("timings"):
+                timings = obj["timings"]
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -350,6 +428,7 @@ class LlamaClient:
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
 
+        self._active = None
         tail_visible, tail_thought = splitter.flush()
         if tail_thought:
             reasoning.append(tail_thought)
@@ -369,5 +448,29 @@ class LlamaClient:
             finish_reason=finish,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0) or 0,
+            prompt_per_sec=float(timings.get("prompt_per_second") or 0.0),
+            gen_per_sec=float(timings.get("predicted_per_second") or 0.0),
             elapsed=elapsed,
         )
+
+
+def _safe_chunks(iterator):
+    """Yield until the stream ends or is cut off.
+
+    A stream that is aborted raises from deep in urllib3, and that is a normal
+    end here rather than a fault: the reply was cancelled on purpose.
+    """
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            return
+        except Exception:
+            return
+
+
+def _close_quietly(response) -> None:
+    try:
+        response.close()
+    except Exception:
+        pass

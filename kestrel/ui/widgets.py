@@ -9,6 +9,7 @@ creeps right you can see a compaction coming before it happens.
 from __future__ import annotations
 
 import html
+import time
 from pathlib import Path
 import re
 
@@ -328,13 +329,28 @@ class ChatView(QTextBrowser):
             return
         self.actionRequested.emit(action, number)
 
-    def _actions_html(self, index: int) -> str:
-        """A row of actions under a reply."""
+    def cost_html(self, tokens: int, seconds: float) -> str:
+        """What that reply cost, on the row people already read."""
+        if not tokens and not seconds:
+            return ""
+        bits = []
+        if tokens:
+            bits.append(f"{tokens:,} tokens")
+        if seconds:
+            bits.append(_duration(seconds))
+        if tokens and seconds > 0.4:
+            bits.append(f"{tokens / seconds:.1f} tok/s")
+        return " · ".join(bits)
+
+    def _actions_html(self, index: int, cost: str = "") -> str:
+        """A row of actions under a reply, with what it cost on the same line."""
         links = [("retry", "retry"), ("speak", "read aloud"),
                  ("copy", "copy"), ("fork", "fork from here")]
         parts = [f'<a href="kestrel:{name}:{index}" '
                  f'style="color:{theme.TEXT_DIM};text-decoration:none;">{label}</a>'
                  for name, label in links]
+        if cost:
+            parts.append(cost)
         return (f'<div style="font-size:10px;color:{theme.TEXT_DIM};'
                 f'margin-top:6px;">' + '  ·  '.join(parts) + '</div>')
 
@@ -538,6 +554,8 @@ class ChatView(QTextBrowser):
 
     def stream_thought(self, chunk: str) -> None:
         self._live = True
+        if not getattr(self, "_thought_started", 0):
+            self._thought_started = time.time()
         """Reasoning streams into a dim band that collapses to a summary line the
         moment the model starts producing its actual answer."""
         if self._thought_anchor is None:
@@ -588,8 +606,11 @@ class ChatView(QTextBrowser):
         self._thought_anchor = None
         self._thought_buf = ""
         self._live = False
-        self._record("_thought_line", head, tokens, approx, full)
-        self._thought_line(head, tokens, approx, full)
+        spent = time.time() - getattr(self, "_thought_started", 0) \
+            if getattr(self, "_thought_started", 0) else 0.0
+        self._thought_started = 0
+        self._record("_thought_line", head, tokens, approx, full, spent)
+        self._thought_line(head, tokens, approx, full, spent)
 
     def toggle_thought(self, number: int) -> None:
         """Expand or collapse one reasoning trace.
@@ -628,7 +649,7 @@ class ChatView(QTextBrowser):
         self.finish_turn()
 
     def _thought_line(self, head: str, tokens: int, approx: str = "",
-                      full: str = "") -> None:   # noqa: D401
+                      full: str = "", seconds: float = 0.0) -> None:  # noqa: D401
         """A thought, shown short with the whole of it one click away.
 
         The trace is the most interesting thing in the transcript when something
@@ -646,10 +667,15 @@ class ChatView(QTextBrowser):
         toggle = (f'  <a href="kestrel:thought:{index}" '
                   f'style="color:{theme.THINK};text-decoration:none;">'
                   f'[{label}]</a>') if (more or expanded) else ""
+        cost = f"{approx}{tokens} tokens"
+        if seconds:
+            cost += f" · {_duration(seconds)}"
+            if tokens and seconds > 0.4:
+                cost += f" · {tokens / seconds:.1f} tok/s"
         body = (f'<div style="color:{theme.TEXT_DIM};font-size:11px;'
                 f'white-space:pre-wrap;">{html.escape(shown)}</div>'
                 f'<div style="color:{theme.TEXT_DIM};font-size:10px;">'
-                f'{approx}{tokens} tokens · not resent{toggle}</div>')
+                f'{cost} · not resent{toggle}</div>')
         self._append(self.bubble("Thinking", body, theme.THINK,
                                  theme.BUBBLE_THINK, width="70%", italic=True))
 
@@ -663,6 +689,7 @@ class ChatView(QTextBrowser):
         return self._thought_anchor is not None
 
     def begin_assistant(self) -> None:
+        self._reply_started = time.time()
         self._open_pending = True
         self._anchor = None
 
@@ -721,13 +748,16 @@ class ChatView(QTextBrowser):
     def reply_text(self, index: int) -> str:
         return self._reply_text.get(index, "")
 
-    def _assistant_block(self, final: str) -> None:
+    def _assistant_block(self, final: str, tokens: int = 0,
+                         seconds: float = 0.0) -> None:
         self._live = False
         self._reply_no += 1
         self._reply_text[self._reply_no] = final
-        self._append(self.bubble("Kestrel",
-                                 md_to_html(final) + self._actions_html(self._reply_no),
-                                 theme.AMBER, theme.BUBBLE_AI))
+        self._append(self.bubble(
+            "Kestrel",
+            md_to_html(final) + self._actions_html(
+                self._reply_no, self.cost_html(tokens, seconds)),
+            theme.AMBER, theme.BUBBLE_AI))
 
     def rerender(self, keep_position: bool = False) -> None:
         """Rebuild the transcript in the current palette.
@@ -788,9 +818,13 @@ class ChatView(QTextBrowser):
         self._anchor = None
         self._open_pending = True
 
-    def end_assistant(self, final: str) -> None:
+    def end_assistant(self, final: str, tokens: int = 0,
+                      seconds: float = 0.0) -> None:
         """Swap the raw streamed text for rendered markdown."""
-        self._record("_assistant_block", final)
+        if not seconds and getattr(self, "_reply_started", 0):
+            seconds = time.time() - self._reply_started
+        self._reply_started = 0
+        self._record("_assistant_block", final, tokens, seconds)
         self._open()
         if self._anchor is None:
             # Nothing was streamed for this turn, so there is no region to
@@ -806,9 +840,11 @@ class ChatView(QTextBrowser):
         c.removeSelectedText()
         self._reply_no += 1
         self._reply_text[self._reply_no] = final
-        c.insertHtml(self.bubble("Kestrel",
-                                 md_to_html(final) + self._actions_html(self._reply_no),
-                                 theme.AMBER, theme.BUBBLE_AI))
+        c.insertHtml(self.bubble(
+            "Kestrel",
+            md_to_html(final) + self._actions_html(
+                self._reply_no, self.cost_html(tokens, seconds)),
+            theme.AMBER, theme.BUBBLE_AI))
         self._live = False
         self._end()
         self._keep_in_view()
@@ -1097,6 +1133,25 @@ def _draw_glyph(kind: str, size: int = 20, colour: str = "") -> QIcon:
         p.drawLine(int(a), int(a + 3), int(mid - 1), int(a + 3))
         p.drawLine(int(mid - 1), int(a + 3), int(mid + 1), int(a + 6))
         p.drawRect(QRectF(a, a + 6, b - a, b - a - 8))
+    elif kind == "agents":                     # three figures, a team
+        for cx, r in ((mid - 5, 3.0), (mid + 5, 3.0), (mid, 3.6)):
+            top = a + (2 if cx == mid else 4)
+            p.drawEllipse(QRectF(cx - r, top, r * 2, r * 2))
+            p.drawArc(QRectF(cx - r - 1.6, top + r * 2, (r + 1.6) * 2, r * 3),
+                      20 * 16, 140 * 16)
+    elif kind == "canvas":                     # a sheet with a pen stroke
+        p.drawRect(QRectF(a, a + 1, b - a - 3, b - a - 2))
+        p.drawLine(int(a + 3), int(mid + 2), int(b - 7), int(mid + 2))
+        p.drawLine(int(a + 3), int(mid + 5), int(b - 9), int(mid + 5))
+        p.drawLine(int(b - 5), int(a + 3), int(b - 1), int(a + 7))   # nib
+        p.drawLine(int(b - 1), int(a + 7), int(b - 6), int(mid))
+    elif kind == "prompt":                     # a speech bubble of ruled text
+        p.drawRoundedRect(QRectF(a, a + 1, b - a, b - a - 5), 3, 3)
+        p.drawLine(int(a + 4), int(b - 4), int(a + 7), int(b))     # tail
+        p.drawLine(int(a + 7), int(b), int(a + 8), int(b - 4))
+        for i, w_ in enumerate((0.62, 0.78, 0.44)):
+            y = a + 4 + i * 3.4
+            p.drawLine(int(a + 3), int(y), int(a + 3 + (b - a - 6) * w_), int(y))
     elif kind == "tools":                      # spanner
         p.drawLine(int(a + 3), int(b - 3), int(b - 5), int(a + 5))
         p.drawArc(QRectF(b - 9, a, 9, 9), 40 * 16, 260 * 16)
@@ -1624,7 +1679,11 @@ class WrappingDelegate(QStyledItemDelegate):
         if option.state & QStyle.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
         colour = index.data(Qt.ForegroundRole)
-        painter.setPen(colour.color() if colour else option.palette.text().color())
+        # theme.TEXT, not the palette. Painting a row by hand steps around the
+        # stylesheet, and Qt's default palette text is a mid grey that is hard
+        # to read on a light background — which is why wrapped rows looked
+        # washed out while short ones did not.
+        painter.setPen(colour.color() if colour else QColor(theme.TEXT))
         painter.setFont(option.font)
         painter.drawText(option.rect.adjusted(4, 3, -4, -3),
                          Qt.TextWordWrap | Qt.AlignTop | Qt.AlignLeft, text)
@@ -1741,3 +1800,85 @@ class MonitorStrip(QWidget):
             if x > self.width():
                 break
         p.end()
+
+
+class DownloadBar(QWidget):
+    """A thin strip of what is downloading, in the space beside the gauge.
+
+    Downloads happen in their own window, which is usually closed — a 15 GB
+    file arriving with no sign of it in the main window is how people conclude
+    nothing is happening and start it again.
+    """
+
+    HEIGHT = 16
+
+    def __init__(self, manager=None, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setFixedHeight(0)          # nothing until there is something
+        self._jobs: list[tuple[str, float, str]] = []   # name, fraction, note
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.hide()
+
+    def refresh(self) -> None:
+        manager = self.manager() if callable(self.manager) else self.manager
+        jobs = []
+        if manager is not None:
+            for job in getattr(manager, "jobs", []):
+                if job.state not in ("running", "paused", "queued"):
+                    continue
+                share = (job.done / job.total) if job.total else 0.0
+                jobs.append((job.name, share, job.summary()))
+        self._jobs = jobs
+        # Height as well as visibility: a hidden widget with a fixed height
+        # still leaves the row it was given, and the window below it stays
+        # short by a line for no reason anyone can see.
+        self.setFixedHeight(self.HEIGHT if jobs else 0)
+        self.setVisible(bool(jobs))
+        if jobs:
+            self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        if not self._jobs:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(mono_font(9))
+        metrics = p.fontMetrics()
+        # Bar first, then its text — not text on top of a bar. A filled bar
+        # behind pale text is unreadable at exactly the moment it matters, when
+        # the fill is passing under the words.
+        each = max(220.0, (self.width() - 12) / len(self._jobs))
+        gap = 18.0
+        x = 6.0
+        middle = self.height() / 2
+        for name, share, note in self._jobs:
+            label = f"{name}  {note}"
+            text_width = min(metrics.horizontalAdvance(label) + 8,
+                             each - 70)          # a bar always keeps 60px
+            bar_width = max(48.0, each - text_width - gap)
+
+            p.setPen(Qt.NoPen)
+            p.fillRect(QRectF(x, middle - 4, bar_width, 8), QColor(theme.PANEL_HI))
+            p.fillRect(QRectF(x, middle - 4,
+                              bar_width * max(0.0, min(1.0, share)), 8),
+                       QColor(theme.AMBER))
+
+            p.setPen(QColor(theme.TEXT_DIM))
+            p.drawText(QRectF(x + bar_width + 7, 0, text_width, self.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       metrics.elidedText(label, Qt.ElideRight, int(text_width)))
+            x += bar_width + text_width + gap
+            if x > self.width():
+                break
+        p.end()
+
+
+def _duration(seconds: float) -> str:
+    """A length of time as a person would say it."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(int(seconds), 60)
+    return f"{minutes}m {rest:02d}s"

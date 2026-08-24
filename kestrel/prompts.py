@@ -74,25 +74,29 @@ def build_system(
 
     # The persona layer replaces the stock identity line rather than stacking on
     # top of it, so voice costs nothing extra.
-    if persona.strip():
+    # Exactly one statement of who this is, at every size. A role's own line
+    # opens the prompt when there is one; the stock line only when there is
+    # not. Two openings, one generic and one specific, is the model being asked
+    # which of them to believe.
+    if team:
+        parts.append(f"Working directory: {workspace}")
+    elif persona.strip():
         parts.append(persona.strip() + f"\nWorking directory: {workspace}")
     elif v == 0:
-        # With a team, the role's own line opens the prompt. Two openings —
-        # one generic, one specific — is the same conflict in miniature.
-        parts.append(f"Working directory: {workspace}" if team else
-                     f"You are Kestrel, an agent with tools. "
+        parts.append("You are Kestrel, an agent with tools. "
                      f"Working directory: {workspace}")
     else:
         parts.append(
-            "You are Kestrel, a capable agent that gets things done by using tools.\n"
-            f"Working directory: {workspace}"
-        )
+            "You are Kestrel, a capable agent that gets things done by using "
+            f"tools.\nWorking directory: {workspace}")
 
     if dialect == "text":
         parts.append(_TEXT_PROTOCOL_TERSE if v <= 1 else _TEXT_PROTOCOL_FULL)
 
-    header = "Tools:" if v == 0 else "## Tools\n"
-    parts.append(f"{header}\n{tool_listing}")
+    # Names and how to ask, at every size. A full signature list is a manual,
+    # and the model can fetch any page of it with tool_help the moment it needs
+    # one — which is cheaper than carrying all of them every turn.
+    parts.append(f"Tools:\n{tool_listing}")
 
     if team:
         # First, because who the model is being frames everything after it.
@@ -117,19 +121,14 @@ def build_system(
             if v <= 1 else CANVAS_RULE)
 
     if skills:
-        if v <= 1:
-            # Names only. A description is a summary of instructions the model
-            # can simply read, and skill_find searches them by keyword — so
-            # paying for summaries every turn buys nothing.
-            # Not a list: a count and where to look. skill_index names them,
-            # skill_find searches their descriptions.
-            total = skill_total or len(skills)
-            parts.append(f"{total} skills are installed. skill_index() names "
-                         "them, skill_find(query) searches them, skill_open"
-                         "(name) reads one.")
-        else:
-            lines = index_lines(skills, budget.max_skills, 200)
-            parts.append("## Skills\n\n" + "\n".join(lines))
+        # A count and where to look, at every size. There is no budget at
+        # which listing them earns its tokens: a description is a summary of
+        # instructions the model can read, skill_find searches those
+        # descriptions properly, and the catalogue is on disk for both of us.
+        total = skill_total or len(skills)
+        parts.append(f"{total} skills are installed. skill_index() names them, "
+                     "skill_find(query) searches them, skill_open(name) reads "
+                     "one.")
 
     if has_plan_tools:
         # The long form only where there is room for it. plan_read fetches the
