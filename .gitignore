@@ -8,3 +8,5 @@
 *.pyc
 /kestrel/tools/__pycache__
 skills/book-to-skill/
+/kestrel/tools/__pycache__
+/kestrel/tools/__pycache__
