@@ -1,0 +1,10 @@
+/kestrel/tools/__pycache__
+/kestrel/__pycache__
+/kestrel/tools/__pycache__
+/kestrel/ui/__pycache__
+/kestrel/tools/__pycache__
+/kestrel/ui/__pycache__
+*.pyc
+*.pyc
+/kestrel/tools/__pycache__
+skills/book-to-skill/
