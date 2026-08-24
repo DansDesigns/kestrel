@@ -22,7 +22,8 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
                                QApplication, QComboBox, QHBoxLayout, QHeaderView,
                                QLabel, QPlainTextEdit, QSizePolicy, QSlider,
-                               QStyle, QStyledItemDelegate, QTabBar, QTextBrowser,
+                               QPushButton, QStackedWidget, QStyle, QStyledItemDelegate,
+                               QTabBar, QTextBrowser,
                                QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -1882,3 +1883,106 @@ def _duration(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, rest = divmod(int(seconds), 60)
     return f"{minutes}m {rest:02d}s"
+
+
+class ChatTabs(QWidget):
+    """Several conversations on one loaded model.
+
+    A tab is a conversation: its own transcript, its own history, its own
+    checklist. What they share is the model, which is the expensive thing —
+    swapping between them costs a prompt rebuild rather than a load, the same
+    trick the agent roles use.
+
+    Each keeps a live ChatView rather than one view re-rendered on switching.
+    Re-rendering would be cheaper in memory and worse in every other way: the
+    scroll position, an expanded trace, a half-typed thought would all be lost
+    on every switch.
+    """
+
+    switched = Signal(int)          # the tab now showing
+    closed = Signal(int)            # a tab the caller should clean up after
+    added = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.bar = QTabBar()
+        self.bar.setExpanding(False)
+        self.bar.setTabsClosable(True)
+        self.bar.setMovable(True)
+        self.bar.setDrawBase(False)
+        self.bar.setElideMode(Qt.ElideRight)
+        self.bar.currentChanged.connect(self._changed)
+        self.bar.tabCloseRequested.connect(self._close)
+        lay.addWidget(self.bar)
+
+        self.stack = QStackedWidget()
+        lay.addWidget(self.stack, 1)
+
+        self.add_btn = QPushButton("+")
+        self.add_btn.setObjectName("Chip")
+        self.add_btn.setFixedWidth(28)
+        self.add_btn.setToolTip("Another conversation on the same model")
+        self.add_btn.clicked.connect(lambda: self.added.emit())
+        self.bar.setParent(self.bar.parent())
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        lay.insertLayout(0, row)
+        lay.removeWidget(self.bar)
+        row.addWidget(self.bar, 1)
+        row.addWidget(self.add_btn)
+
+    # -- membership ----------------------------------------------------------
+    def add(self, view, title: str = "New chat") -> int:
+        index = self.stack.addWidget(view)
+        self.bar.blockSignals(True)
+        self.bar.addTab(title)
+        self.bar.blockSignals(False)
+        self.bar.setCurrentIndex(index)
+        self._show_bar()
+        return index
+
+    def current(self):
+        return self.stack.currentWidget()
+
+    def count(self) -> int:
+        return self.stack.count()
+
+    def view(self, index: int):
+        return self.stack.widget(index)
+
+    def set_title(self, index: int, title: str) -> None:
+        if 0 <= index < self.bar.count():
+            words = " ".join(str(title or "").split())
+            self.bar.setTabText(index, words[:28] or "New chat")
+            self.bar.setTabToolTip(index, words)
+
+    def _changed(self, index: int) -> None:
+        if 0 <= index < self.stack.count():
+            self.stack.setCurrentIndex(index)
+            self.switched.emit(index)
+
+    def _close(self, index: int) -> None:
+        # The last one stays: a window with no conversation in it has nothing
+        # to show and no obvious way back.
+        if self.stack.count() <= 1:
+            return
+        self.closed.emit(index)
+
+    def remove(self, index: int) -> None:
+        view = self.stack.widget(index)
+        if view is not None:
+            self.stack.removeWidget(view)
+            view.deleteLater()
+        self.bar.removeTab(index)
+        self._show_bar()
+
+    def _show_bar(self) -> None:
+        """One conversation needs no tab bar; it is a row of chrome saying
+        'there is one of these'."""
+        showing = self.stack.count() > 1
+        self.bar.setVisible(showing)
+        self.add_btn.setVisible(showing)

@@ -816,6 +816,26 @@ byte-identical to the original.
 
 ---
 
+### 8b. Several conversations, one model
+
+The chat area is tabbed. A tab is a conversation — its own transcript, its own
+history, its own checklist — and what they share is the model, which is the
+expensive part. Switching costs a prompt rebuild rather than a load, the same
+trick the agent roles use.
+
+Each tab keeps a live view rather than one view re-rendered on switching. That
+costs some memory and saves everything else: the scroll position, an expanded
+reasoning trace and a half-typed thought all survive a switch, where re-rendering
+would lose them.
+
+The tab bar hides itself when there is only one conversation — a row of chrome
+saying "there is one of these" is worth nothing — and appears with the second.
+Closing a tab saves its conversation first, so it is not the same as discarding
+it, and the last tab refuses to close: a window with no conversation in it has
+nothing to show and no obvious way back.
+
+---
+
 ## 8c. A team on one model
 
 Two switches in **Settings → Agent**. *Several agents sharing one model* turns
@@ -1536,6 +1556,12 @@ chevron at its midpoint. Clicking anywhere along it collapses that panel and
 gives its width to the transcript; clicking again restores it to the width it
 had. The whole strip is the target rather than a small button, and the chevron
 points the way the panel will move.
+
+The row above the composer carries both halves of "what is it doing": the phase
+on the left, the generation rate on the right. It sits there rather than in the
+bottom bar so it survives that bar being folded away — the number you want most
+while waiting should not be the one that disappears when you make room for the
+conversation.
 
 The indicator names the phase as it happens: **reading the prompt — 2,290
 tokens**, then **reasoning** if the model thinks, then **replying** once the

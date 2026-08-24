@@ -40,7 +40,7 @@ from .panels import (AgentsPanel, BackendPanel, CanvasPanel, MemoryPanel,
 from .downloads_window import DownloadsWindow
 from .settings import SettingsDialog
 from .splash import Splash
-from .widgets import (ActivityTree, ChatView, ContextGauge,
+from .widgets import (ActivityTree, ChatTabs, ChatView, ContextGauge,
                       BusyOverlay, Field, IconTabBar, LazyTab, Readout,
                       DownloadBar, MonitorStrip, TypingIndicator, clear_font_cache,
                       install_wheel_guard, mono_font, stretch_columns)
@@ -757,16 +757,22 @@ class MainWindow(QWidget):
         self.setMinimumSize(720, 480)
         self.resize(*self._default_size())
 
-        self.chat = ChatView()
+        # One conversation per tab, each with its own transcript, history and
+        # checklist; the model is what they share. `self.chat` is whichever is
+        # showing, so everything that reads it carries on unchanged.
+        self.tabs = ChatTabs()
+        self._tab_state: list[dict] = []
+        self._first_chat = self._new_chat_view()
         self.activity = ActivityTree()
         self.gauge = ContextGauge()
         self.monitor_strip = MonitorStrip(sysmon.Monitor())
         self.monitor_timer = QTimer(self)
         self.monitor_timer.setInterval(2000)
-        self.monitor_timer.timeout.connect(self.monitor_strip.refresh)
-        self.monitor_timer.timeout.connect(lambda: self.download_bar.refresh())
-        self.monitor_timer.start()
+        self.monitor_timer.timeout.connect(self._tick_bottom)
         self.monitor_strip.refresh()
+        # Started at the end of _build, not here. A timer running while the
+        # window is still being assembled fires at widgets that do not exist
+        # yet, and the first tick lands somewhere between the two.
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setObjectName("Flush")
@@ -775,6 +781,8 @@ class MainWindow(QWidget):
 
         self.progress("building the interface")
         self._build()
+        # Everything it touches exists now.
+        self.monitor_timer.start()
         self._connect_signals()
         self.statusReady.connect(self._status)
         self._rate_timer = QTimer(self)
@@ -886,10 +894,27 @@ class MainWindow(QWidget):
         centre.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         clay = QVBoxLayout(centre)
         clay.setContentsMargins(8, 0, 8, 0)
-        clay.addWidget(self.chat, 1)
+        self.tabs.add(self._first_chat, "New chat")
+        self._tab_state.append(self._blank_tab())
+        self.tabs.switched.connect(self._tab_switched)
+        self.tabs.closed.connect(self._close_tab)
+        self.tabs.added.connect(self.new_tab)
+        clay.addWidget(self.tabs, 1)
 
+        # The activity line and the rate share a row: what it is doing on the
+        # left, how fast on the right. Above the composer, so both survive the
+        # bottom bar being folded away.
         self.typing = TypingIndicator()
-        clay.addWidget(self.typing)
+        self.rate_label = QLabel("")
+        self.rate_label.setObjectName("Dim")
+        self.rate_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.rate_label.setToolTip("Generation speed for the last reply")
+        pace = QHBoxLayout()
+        pace.setContentsMargins(0, 0, 0, 0)
+        pace.setSpacing(8)
+        pace.addWidget(self.typing, 1)
+        pace.addWidget(self.rate_label)
+        clay.addLayout(pace)
         self.busy_overlay.attach(centre)
 
         self.input = QPlainTextEdit()
@@ -950,8 +975,7 @@ class MainWindow(QWidget):
         self.follow_btn.setToolTip("Keep the newest output in view. Scrolling up "
                                    "releases it automatically.")
         self.follow_btn.toggled.connect(self.chat.set_following)
-        self.chat.followChanged.connect(self._follow_changed)
-        self.chat.actionRequested.connect(self.on_reply_action)
+        # Each view is connected as it is made, in _new_chat_view.
         row.addWidget(self.follow_btn)
 
         self.continue_btn = QPushButton("Continue")
@@ -1166,6 +1190,99 @@ class MainWindow(QWidget):
         self._status(f"{theme.current.capitalize()} palette")
 
     INPUT_MAX_LINES = 8
+
+    @property
+    def chat(self):
+        """The transcript on screen."""
+        return self.tabs.current()
+
+    def _new_chat_view(self):
+        view = ChatView()
+        view.actionRequested.connect(self.on_reply_action)
+        view.followChanged.connect(self._follow_changed)
+        return view
+
+    def _blank_tab(self) -> dict:
+        return {"session": sessionmod.new_session(), "history": [],
+                "digest": "", "plan": {}, "replies": {}, "reply_no": 0}
+
+    def new_tab(self) -> None:
+        """Another conversation on the same model."""
+        self._stash_tab()
+        view = self._new_chat_view()
+        self.tabs.add(view, "New chat")
+        self._tab_state.append(self._blank_tab())
+        self.session = self._tab_state[-1]["session"]
+        self._replies = self._tab_state[-1]["replies"]
+        self._reply_no = 0
+        self.requestReset.emit()
+        self.requestNameSession.emit(self.session.id)
+        self.plan_panel.update_todo(None)
+        self._status("New conversation — same model, its own history")
+
+    def _stash_tab(self) -> None:
+        """Put the live state back into the tab it belongs to."""
+        index = self.tabs.bar.currentIndex()
+        if not (0 <= index < len(self._tab_state)):
+            return
+        agent = self.worker.agent
+        state = self._tab_state[index]
+        state["session"] = self.session
+        state["replies"] = self._replies
+        state["reply_no"] = self._reply_no
+        if agent is not None:
+            state["history"] = [dict(m) for m in agent.history]
+            state["digest"] = getattr(agent.ctx, "digest", "") if agent.ctx else ""
+            if agent.todo is not None:
+                state["plan"] = agent.todo.to_state()
+
+    @Slot(int)
+    def _tab_switched(self, index: int) -> None:
+        """Make the agent believe it is in the conversation now showing."""
+        if not (0 <= index < len(self._tab_state)):
+            return
+        if getattr(self, "_switching_tab", False):
+            return
+        self._switching_tab = True
+        try:
+            state = self._tab_state[index]
+            agent = self.worker.agent
+            self.session = state["session"]
+            self._replies = state["replies"]
+            self._reply_no = state["reply_no"]
+            if agent is not None:
+                agent.load_history(state["history"], state["digest"])
+                if agent.todo is not None:
+                    agent.todo.load_state(state["plan"])
+                    self.plan_panel.update_todo(agent.todo)
+            self.requestNameSession.emit(state["session"].id)
+            self.gauge.update()
+        finally:
+            self._switching_tab = False
+
+    @Slot(int)
+    def _close_tab(self, index: int) -> None:
+        """Save it, then let it go."""
+        if not (0 <= index < len(self._tab_state)):
+            return
+        if index == self.tabs.bar.currentIndex():
+            self._stash_tab()
+        state = self._tab_state.pop(index)
+        # Saved on the way out, so closing a tab is not the same as discarding
+        # the conversation in it.
+        try:
+            if state["history"]:
+                session = state["session"]
+                session.messages = [dict(m) for m in state["history"]]
+                session.digest = state["digest"]
+                session.plan = state["plan"]
+                sessionmod.save_session(
+                    session, self.projects_panel.current_project())
+                self.projects_panel.refresh_sessions()
+        except Exception as e:
+            self.log.appendPlainText(f"[sessions] could not save: {e}")
+        self.tabs.remove(index)
+        self._tab_switched(self.tabs.bar.currentIndex())
 
     def _fit_input(self) -> None:
         """Grow the composer with its text, up to a point, then scroll.
@@ -1959,6 +2076,20 @@ class MainWindow(QWidget):
         self.bar_model.setText(name or "no model loaded…")
         self.bar_model.setToolTip(str(path) or "The model currently loaded")
 
+    def _tick_bottom(self) -> None:
+        """Refresh the strips that report on the machine.
+
+        Both are optional at any given moment — one is hidden when nothing is
+        downloading, and neither exists until the bottom bar is built — so the
+        tick asks rather than assumes.
+        """
+        strip = getattr(self, "monitor_strip", None)
+        if strip is not None:
+            strip.refresh()
+        bar = getattr(self, "download_bar", None)
+        if bar is not None:
+            bar.refresh()
+
     def toggle_bottom(self, folded: bool | None = None) -> None:
         """Fold the bottom block down to the system monitors, or back."""
         self._bottom_folded = (not getattr(self, "_bottom_folded", False)
@@ -2213,6 +2344,7 @@ class MainWindow(QWidget):
             if not self._exact_rate:
                 self.gauge.set_rate(rate)
                 self.r_speed.set(f"{rate:.1f} tok/s")
+                self.rate_label.setText(f"{rate:.1f} tok/s")
 
     @Slot(float, int)
     def on_gen(self, tps: float, tokens: int) -> None:
@@ -2221,6 +2353,7 @@ class MainWindow(QWidget):
             self._exact_rate = tps
             self.r_speed.set(f"{tps:.1f} tok/s")
             self.gauge.set_rate(tps)
+            self.rate_label.setText(f"{tps:.1f} tok/s")
 
     @Slot(str, str)
     def on_approval(self, name: str, preview: str) -> None:
