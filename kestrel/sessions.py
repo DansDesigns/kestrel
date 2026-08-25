@@ -249,6 +249,99 @@ def title_from(messages: list[dict]) -> str:
     return "Empty conversation"
 
 
+# Openings people type before saying what they want. Stripped so the label is
+# about the work rather than the politeness.
+_OPENERS = (
+    "hi", "hey", "hello", "ok", "okay", "right", "so", "now", "please",
+    "could you", "can you", "would you", "will you", "i want you to",
+    "i need you to", "i would like you to", "i'd like you to", "id like you to",
+    "i want to", "i need to", "help me", "lets", "let's", "let us",
+    "carry on", "continue with", "continue", "go ahead and",
+    "make me", "make", "create me", "create", "write me", "write", "build me",
+    "build", "generate", "produce", "give me", "show me", "add", "set up",
+    "look at", "read", "check", "fix", "update", "improve", "tune", "help",
+    "what is", "what are", "how do i", "how to", "tell me",
+    "i need", "i want", "i have", "we need", "we want",
+)
+_JOINERS = {"a", "an", "the", "some", "my", "our", "this", "that", "for", "to",
+            "of", "in", "on", "with", "about", "and", "then", "please", "me",
+            "it", "its", "into", "from", "at", "by", "across", "through",
+            "using", "via", "over", "under", "between", "against", "onto"}
+
+
+def short_title(messages: list[dict], limit: int = 26) -> str:
+    """A few words naming the work, for a tab.
+
+    A tab is read sideways while doing something else, so it has room for about
+    three words. The first thing the person said contains them, wrapped in
+    politeness and instruction — "please make me an arduino sketch to flash an
+    LED" is, for labelling purposes, "arduino sketch".
+
+    Heuristic on purpose. Asking the model would cost a generation on every new
+    conversation, and be wrong in more interesting ways.
+    """
+    first = ""
+    for message in messages:
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):      # a message with pictures in it
+                content = " ".join(part.get("text", "") for part in content
+                                   if isinstance(part, dict))
+            first = " ".join(str(content or "").split())
+            if first:
+                break
+    if not first:
+        return ""
+
+    # Punctuation to spaces before matching: "hey, please look…" hides its
+    # opener behind a comma, and the label ends up naming the greeting.
+    low = re.sub(r"[^a-z0-9.+#_-]+", " ", first.lower()).strip()
+    # Peel openers off the front, repeatedly: "ok so please can you make me…"
+    trimmed = True
+    while trimmed:
+        trimmed = False
+        for opener in _OPENERS:
+            if low.startswith(opener + " "):
+                low = low[len(opener) + 1:].lstrip(",. ")
+                trimmed = True
+                break
+        for word in ("a ", "an ", "the ", "some ", "my ", "our "):
+            if low.startswith(word):
+                low = low[len(word):]
+                trimmed = True
+
+    # Stop at the first clause boundary: what comes after it is a condition or
+    # a second instruction, and the label wants the subject of the first.
+    low = re.split(r"\b(?:so|that|which|because|after|before|when|then|and|"
+                   r"but|if|while|to)\b", low, maxsplit=1)[0].strip()
+
+    words = [w for w in low.split() if w]
+    if not words:
+        return ""
+
+    kept: list[str] = []
+    for word in words:
+        if len(" ".join(kept + [word])) > limit and kept:
+            break
+        kept.append(word)
+        if len(kept) >= 4:
+            break
+    # A label ending in "to", "about" or "of" is a sentence cut in half.
+    while kept and kept[-1] in _JOINERS:
+        kept.pop()
+    if not kept:
+        kept = words[:2]
+    # Put the original capitalisation back: France, HANDOVER.md and llama.cpp
+    # are names, and lowercasing them to make a label is a small vandalism.
+    original = {w.strip(",.;:!?()[]\"'").lower(): w.strip(",.;:!?()[]\"'")
+                for w in first.split()}
+    kept = [original.get(w, w) for w in kept]
+    label = " ".join(kept)
+    if label[:1].islower():
+        label = label[:1].upper() + label[1:]
+    return label
+
+
 def save_session(session: Session, project: Project) -> Path:
     directory = project.session_dir()
     directory.mkdir(parents=True, exist_ok=True)

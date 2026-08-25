@@ -13,7 +13,8 @@ import time
 from pathlib import Path
 import re
 
-from PySide6.QtCore import (QEvent, QObject, QRectF, QSize, Qt, QTimer,
+from PySide6.QtCore import (QEvent, QObject, QPointF, QRectF, QSize, Qt,
+                            QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
                            QImage, QPixmap, QTextDocument,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
                                QApplication, QComboBox, QHBoxLayout, QHeaderView,
                                QLabel, QPlainTextEdit, QSizePolicy, QSlider,
                                QPushButton, QStackedWidget, QStyle, QStyledItemDelegate,
+                               QToolButton,
                                QTabBar, QTextBrowser,
                                QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -276,6 +278,10 @@ class ChatView(QTextBrowser):
         self.following = True
         self._saved_scroll: int | None = None
         self._writing = False
+        # Set before anything can emit. A scrollbar signal during construction
+        # would otherwise reach a handler reading a flag that does not exist
+        # yet, which surfaces as an AttributeError from deep inside Qt.
+        self._user_scrolled = False
         self._reply_no = 0
         self._reply_text: dict[int, str] = {}
         self._thought_no = 0
@@ -1910,8 +1916,14 @@ class ChatTabs(QWidget):
         lay.setSpacing(0)
 
         self.bar = QTabBar()
+        self.bar.setObjectName("ChatTabBar")
         self.bar.setExpanding(False)
+        self.bar.setUsesScrollButtons(True)
         self.bar.setTabsClosable(True)
+        # Drawn, so it is a red cross rather than whichever glyph the platform
+        # style happens to supply — on Windows that is a pale square that reads
+        # as a disabled button.
+        self._close_icon = cross_icon(theme.ALERT)
         self.bar.setMovable(True)
         self.bar.setDrawBase(False)
         self.bar.setElideMode(Qt.ElideRight)
@@ -1924,8 +1936,8 @@ class ChatTabs(QWidget):
 
         self.add_btn = QPushButton("+")
         self.add_btn.setObjectName("Chip")
-        self.add_btn.setFixedWidth(28)
-        self.add_btn.setToolTip("Another conversation on the same model")
+        self.add_btn.setFixedWidth(30)
+        self.add_btn.setToolTip("New conversation on the same model")
         self.add_btn.clicked.connect(lambda: self.added.emit())
         self.bar.setParent(self.bar.parent())
         row = QHBoxLayout()
@@ -1941,6 +1953,21 @@ class ChatTabs(QWidget):
         self.bar.blockSignals(True)
         self.bar.addTab(title)
         self.bar.blockSignals(False)
+        # Our own button, not Qt's. Setting an icon on the built-in one leaves
+        # the style's square glyph painted underneath, which reads as a
+        # disabled control rather than a close.
+        button = QToolButton()
+        button.setObjectName("TabClose")
+        button.setIcon(self._close_icon)
+        button.setIconSize(QSize(11, 11))
+        # Given a size, or the tab's padding crops it to a corner.
+        button.setFixedSize(QSize(16, 16))
+        button.setAutoRaise(True)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("Close this conversation")
+        button.clicked.connect(
+            lambda _=False, w=self.stack.widget(index): self._close_widget(w))
+        self.bar.setTabButton(index, QTabBar.RightSide, button)
         self.bar.setCurrentIndex(index)
         self._show_bar()
         return index
@@ -1965,6 +1992,12 @@ class ChatTabs(QWidget):
             self.stack.setCurrentIndex(index)
             self.switched.emit(index)
 
+    def _close_widget(self, view) -> None:
+        """Close by identity, since a tab's index changes when others move."""
+        index = self.stack.indexOf(view)
+        if index >= 0:
+            self._close(index)
+
     def _close(self, index: int) -> None:
         # The last one stays: a window with no conversation in it has nothing
         # to show and no obvious way back.
@@ -1981,8 +2014,31 @@ class ChatTabs(QWidget):
         self._show_bar()
 
     def _show_bar(self) -> None:
-        """One conversation needs no tab bar; it is a row of chrome saying
-        'there is one of these'."""
-        showing = self.stack.count() > 1
-        self.bar.setVisible(showing)
-        self.add_btn.setVisible(showing)
+        """Hide the tabs when there is one, never the button that makes another.
+
+        A row of chrome saying "there is one of these" earns nothing — but
+        hiding the + with it left no way to reach a second conversation at all,
+        which is worse than the chrome.
+        """
+        self.bar.setVisible(self.stack.count() > 1)
+
+
+def cross_icon(colour: str, size: int = 12) -> QIcon:
+    """A plain cross, in whatever colour is asked for."""
+    pix = QPixmap(size * 2, size * 2)
+    pix.setDevicePixelRatio(2.0)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(colour))
+    pen.setWidthF(1.9)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    # Logical coordinates, not pixels. With a device pixel ratio of 2 the
+    # painter's space is `size` across even though the pixmap is twice that,
+    # so drawing beyond it puts most of the cross off the edge.
+    a, b = size * 0.28, size * 0.72
+    p.drawLine(QPointF(a, a), QPointF(b, b))
+    p.drawLine(QPointF(b, a), QPointF(a, b))
+    p.end()
+    return QIcon(pix)

@@ -828,8 +828,30 @@ costs some memory and saves everything else: the scroll position, an expanded
 reasoning trace and a half-typed thought all survive a switch, where re-rendering
 would lose them.
 
-The tab bar hides itself when there is only one conversation — a row of chrome
+The **+** beside the tabs is always there, including with one conversation —
+hiding it along with the bar left no way to reach a second at all, which is
+worse than the chrome it saved. The tab bar itself hides when there is only one
+conversation — a row of chrome
 saying "there is one of these" is worth nothing — and appears with the second.
+**A tab names itself** from the first thing said in it — "Bee game
+development", "Loving poem about space", "Arduino sketch". A tab is read
+sideways while doing something else, so it has room for about three words, and
+the first message contains them wrapped in politeness and instruction: openers
+are peeled off, the sentence is cut at its first clause boundary, trailing
+prepositions are dropped, and proper nouns keep their capitals — `HANDOVER.md`
+and `llama.cpp` survive intact.
+
+It is a heuristic on purpose. Asking the model for a title would cost a
+generation on every new conversation and be wrong in more interesting ways. Only
+the first message names a tab: renaming on every turn would make the tabs move
+under the pointer. A saved conversation brings its own title with it.
+
+Opening a saved conversation, or starting a new one, asks whether it belongs in
+this tab or a new one — but only when the current tab has a conversation in it.
+Emptiness is judged by whether anything has been said, not by whether the
+transcript has text: a fresh window already shows a readiness note, and judging
+by that would ask the question before anything had happened.
+
 Closing a tab saves its conversation first, so it is not the same as discarding
 it, and the last tab refuses to close: a window with no conversation in it has
 nothing to show and no obvious way back.

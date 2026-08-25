@@ -1204,7 +1204,39 @@ class MainWindow(QWidget):
 
     def _blank_tab(self) -> dict:
         return {"session": sessionmod.new_session(), "history": [],
-                "digest": "", "plan": {}, "replies": {}, "reply_no": 0}
+                "digest": "", "plan": {}, "replies": {}, "reply_no": 0,
+                "named": False}
+
+    def _where_to_open(self, what: str) -> str:
+        """Ask which tab, unless there is nothing to lose.
+
+        A conversation already under way is worth protecting: replacing it is
+        the sort of thing noticed a second too late. An empty tab has nothing
+        to protect, so the question would be noise.
+        """
+        # Whether there is a conversation, not whether there is text. A fresh
+        # window already shows a readiness note, so judging by the transcript
+        # would ask the question before anything had been said.
+        agent = self.worker.agent
+        spoken = bool(agent is not None and agent.history)
+        if not spoken:
+            return "here"
+        box = QMessageBox(self)
+        box.setWindowTitle(what)
+        box.setText(f"Open {what.lower()} where?")
+        box.setInformativeText("This conversation is still here either way — "
+                               "it is saved before anything replaces it.")
+        new = box.addButton("In a new tab", QMessageBox.AcceptRole)
+        here = box.addButton("In this tab", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(new)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is new:
+            return "new"
+        if clicked is here:
+            return "here"
+        return ""
 
     def new_tab(self) -> None:
         """Another conversation on the same model."""
@@ -1219,6 +1251,26 @@ class MainWindow(QWidget):
         self.requestNameSession.emit(self.session.id)
         self.plan_panel.update_todo(None)
         self._status("New conversation — same model, its own history")
+
+    def _name_tab_from(self, text) -> None:
+        """Name a tab after the work in it, once there is work in it.
+
+        Only the first message names it: a conversation is about what it was
+        opened for, and renaming it on every turn would make the tabs move
+        under the pointer.
+        """
+        index = self.tabs.bar.currentIndex()
+        if not (0 <= index < len(self._tab_state)):
+            return
+        state = self._tab_state[index]
+        if state.get("named"):
+            return
+        label = sessionmod.short_title([{"role": "user", "content": text}])
+        if not label:
+            return
+        state["named"] = True
+        state["session"].title = label
+        self.tabs.set_title(index, label)
 
     def _stash_tab(self) -> None:
         """Put the live state back into the tab it belongs to."""
@@ -3064,7 +3116,20 @@ class MainWindow(QWidget):
         if agent is None:
             self._status("Not connected yet")
             return
+        where = self._where_to_open("Saved conversation")
+        if not where:
+            return
+        if where == "new":
+            # A fresh tab first, then load into it: the conversation on screen
+            # keeps its place rather than being displaced by one from disk.
+            self.new_tab()
         self.session = session
+        index = self.tabs.bar.currentIndex()
+        if 0 <= index < len(self._tab_state):
+            label = (session.title
+                     or sessionmod.short_title(session.messages) or "Conversation")
+            self._tab_state[index]["named"] = True
+            self.tabs.set_title(index, label)
         self.requestNameSession.emit(session.id)
         agent.load_history(session.messages, session.digest)
         if agent.todo is not None:
@@ -3159,6 +3224,7 @@ class MainWindow(QWidget):
         agent = self.worker.agent
         self._pending_prompt = text
         self._exact_rate = 0.0
+        self._name_tab_from(text)
         self._pending_mark = len(agent.history) if agent is not None else 0
         self.chat.add_user(text)
         self.chat.begin_assistant()
@@ -3275,6 +3341,12 @@ class MainWindow(QWidget):
         self.speaker.on_error = lambda msg: self.statusReady.emit(f"Speech: {msg}")
 
     def new_session(self) -> None:
+        where = self._where_to_open("New conversation")
+        if not where:
+            return
+        if where == "new":
+            self.new_tab()
+            return
         self._save_session()
         self.session = sessionmod.new_session()
         self.requestNameSession.emit(self.session.id)

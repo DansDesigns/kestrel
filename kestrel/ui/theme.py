@@ -230,6 +230,28 @@ QFrame#Panel, QWidget#Panel {{ background: {panel}; border: 1px solid {line}; bo
 QWidget#TopBar {{ background: {panel}; border-bottom: 1px solid {line}; }}
 /* The model name reads as a fixed label, the status beside it as passing
    commentary — different weights so a glance can tell them apart. */
+/* Conversation tabs. Room enough for a few words of the first message, which
+   is what tells one conversation from another — a tab reading "Fi…" is a tab
+   you have to open to identify. */
+QTabBar#ChatTabBar::tab {{
+    min-width: 116px; max-width: 220px;
+    padding: 6px 26px 6px 12px; margin-right: 3px;
+    color: {dim}; background: {panel_hi};
+    border: 1px solid {line}; border-bottom: none;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}}
+QTabBar#ChatTabBar::tab:selected {{
+    color: {text}; background: {panel}; border-color: {amber};
+}}
+QTabBar#ChatTabBar::tab:hover {{ color: {text}; }}
+/* The close button is a real widget with an icon set on it, not a stylesheet
+   sub-control: styling ::close-button replaces its rendering and the icon is
+   never drawn. Only its surround is styled here. */
+QToolButton#TabClose {{
+    border: none; background: transparent; border-radius: 7px;
+    padding: 1px;
+}}
+QToolButton#TabClose:hover {{ background: {line}; }}
 QLabel#BarModel {{
     color: {text}; font-weight: 600; padding: 3px 12px;
     background: {panel_hi}; border: 1px solid {line}; border-radius: 5px;
