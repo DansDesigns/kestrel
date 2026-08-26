@@ -116,6 +116,19 @@ class AgentWorker(QObject):
         if self.agent:
             self.agent.reset()
 
+    @Slot(bool)
+    def set_plan_enabled(self, on: bool) -> None:
+        """Take the checklist and its tools away, or give them back.
+
+        The registry is rebuilt because the plan tools go with it: leaving
+        plan and todo callable with no checklist behind them is worse than not
+        offering them.
+        """
+        if not self.agent:
+            return
+        self.agent.cfg.todo_enabled = bool(on)
+        self.agent.set_planning(bool(on))
+
     @Slot(str)
     def switch_agent(self, name: str) -> None:
         if not self.agent:
@@ -706,6 +719,7 @@ class MainWindow(QWidget):
     requestForgetProject = Signal()
     requestNameSession = Signal(str)
     requestSwitchAgent = Signal(str)
+    requestPlanEnabled = Signal(bool)
     transcriptReady = Signal(str)
     statusReady = Signal(str)
     serverFailed = Signal(str)
@@ -886,7 +900,10 @@ class MainWindow(QWidget):
         left.setMinimumWidth(0)
         self._label_tabs(left)
         self.left_panel = left
-        splitter.addWidget(left)
+        # A heading naming the panel. The rail is icons, and an icon you have
+        # to hover to identify is a puzzle rather than a label — the tooltip
+        # says what it is, but only to someone who already suspected.
+        splitter.addWidget(self._titled(left, "left"))
 
         # centre: transcript and composer
         centre = QWidget()
@@ -1031,7 +1048,7 @@ class MainWindow(QWidget):
         self._label_tabs(right, self._right_tabs)
         self.right_panel = right
 
-        splitter.addWidget(right)
+        splitter.addWidget(self._titled(right, "right"))
 
         # Left, centre, right — and therefore exactly two handles. The 1px
         # spacers that used to sit between them gave the splitter five children
@@ -1878,6 +1895,26 @@ class MainWindow(QWidget):
         self.splitter.setSizes(sizes)
         self._collapsed[key] = not visible
 
+    def _titled(self, tabs, key: str):
+        """Wrap a tab widget with a heading that follows the current tab."""
+        holder = QWidget()
+        lay = QVBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        title = QLabel("")
+        title.setObjectName("PanelTitle")
+        lay.addWidget(title)
+        lay.addWidget(tabs, 1)
+
+        def name_it(_index=0):
+            index = tabs.currentIndex()
+            title.setText(tabs.tabToolTip(index) or tabs.tabText(index))
+        tabs.currentChanged.connect(name_it)
+        name_it()
+        setattr(self, f"{key}_title", title)
+        setattr(self, f"{key}_holder", holder)
+        return holder
+
     def _content_min(self, panel) -> int:  # noqa: C901
         """The narrowest this panel can be drawn without cutting anything off.
 
@@ -2015,7 +2052,7 @@ class MainWindow(QWidget):
 
         # The three switches people reach for most, where the state they
         # affect is already on screen.
-        self.think_box = QCheckBox("Thinking")
+        self.think_box = QCheckBox("Think")
         self.think_box.setChecked(self.cfg.thinking.enabled)
         self.think_box.setToolTip("Let the model reason before answering. It "
                                   "costs tokens and time; on a small window it "
@@ -2029,11 +2066,33 @@ class MainWindow(QWidget):
                                    "than written straight to disk.")
         self.canvas_box.toggled.connect(self._set_canvas_forced)
 
-        self.tts_box = QCheckBox("Speech")
+        self.plan_box = QCheckBox("Plan")
+        self.plan_box.setChecked(self.cfg.todo_enabled)
+        self.plan_box.setToolTip("Break work into a checklist and follow it. "
+                                 "Off for a conversation, where planning a "
+                                 "question is overhead with nothing to show "
+                                 "for it.")
+        self.plan_box.toggled.connect(self._set_plan_enabled)
+
+        self.tts_box = QCheckBox("TTS")
         self.tts_box.setChecked(self.cfg.speech.auto_speak)
-        self.tts_box.setToolTip("Read each reply aloud as it finishes.")
+        # "Speak" sat next to a Speak button that does something else — one
+        # reads every reply, the other reads the one you pressed it on.
+        self.tts_box.setToolTip("Text to speech: read every reply aloud as it "
+                                "finishes. The Speak button below the composer "
+                                "reads one reply on request.")
         self.tts_box.toggled.connect(self._set_tts)
-        lay.addWidget(_row(self.think_box, self.canvas_box, self.tts_box))
+        # Their own row rather than the shared helper: that one divides the
+        # width evenly, which crops the longest label to fit the shortest.
+        # A checkbox should take the width of its own words.
+        switches = QHBoxLayout()
+        switches.setContentsMargins(0, 0, 0, 0)
+        switches.setSpacing(10)
+        for box in (self.think_box, self.canvas_box, self.plan_box, self.tts_box):
+            box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            switches.addWidget(box)
+        switches.addStretch(1)
+        lay.addLayout(switches)
 
         # The three sampling profiles worth reaching for mid-conversation.
         # "Precise" is called Coder here: that is what it is for, and a name
@@ -2192,6 +2251,13 @@ class MainWindow(QWidget):
         self._status("New files go through the canvas" if on else
                      "write_file may create files directly")
 
+    def _set_plan_enabled(self, on: bool) -> None:
+        self.cfg.todo_enabled = bool(on)
+        self.cfg.save()
+        self.requestPlanEnabled.emit(bool(on))
+        self._status("Plan on — work will be broken into steps" if on else
+                     "Plan off — no checklist, no plan tools")
+
     def _set_tts(self, on: bool) -> None:
         self.cfg.speech.auto_speak = bool(on)
         self.cfg.save()
@@ -2220,6 +2286,7 @@ class MainWindow(QWidget):
         self.requestForgetProject.connect(self.worker.forget_project)
         self.requestNameSession.connect(self.worker.name_session)
         self.requestSwitchAgent.connect(self.worker.switch_agent)
+        self.requestPlanEnabled.connect(self.worker.set_plan_enabled)
         self.worker.agentSwitched.connect(self._agent_switched)
         self.worker.ready.connect(self.on_ready)
         self.worker.failed.connect(self.on_failed)

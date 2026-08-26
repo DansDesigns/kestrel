@@ -252,6 +252,14 @@ QToolButton#TabClose {{
     padding: 1px;
 }}
 QToolButton#TabClose:hover {{ background: {line}; }}
+/* The panel heading. Quiet — it names what you are looking at rather than
+   competing with it — but present, so an icon rail does not require hovering
+   to read. */
+QLabel#PanelTitle {{
+    color: {dim}; font-weight: 600; letter-spacing: 0.6px;
+    padding: 7px 12px 5px 12px;
+    border-bottom: 1px solid {line};
+}}
 QLabel#BarModel {{
     color: {text}; font-weight: 600; padding: 3px 12px;
     background: {panel_hi}; border: 1px solid {line}; border-radius: 5px;

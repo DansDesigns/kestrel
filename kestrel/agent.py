@@ -689,6 +689,23 @@ class Agent:
         self.emit("delegated", {"to": target.name, "text": answer})
         return True, f"{target.name} reports:\n{answer}"
 
+    def set_planning(self, on: bool) -> None:
+        """Turn the checklist on or off between turns."""
+        self.cfg.todo_enabled = bool(on)
+        if on and self.todo is None:
+            self.todo = TodoList.load(self.cfg.workspace_path())
+        elif not on:
+            self.todo = None
+        self.registry = build_registry(
+            self.cfg, lambda: self.skills, approver=self._approve,
+            memory_provider=lambda: self.memory,
+            todo_provider=(lambda: self.todo) if self.todo is not None else None,
+            persona_provider=lambda: self.persona,
+            roster_provider=(lambda: self.roster) if self.roster is not None else None,
+            delegate_fn=self.delegate)
+        self._system_cache = ""
+        self.emit("todo", {"todo": self.todo})
+
     def switch_agent(self, name: str) -> str:
         """Become a different member of the team.
 

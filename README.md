@@ -437,8 +437,17 @@ Precise is called Coder here because that is what it is for, and a name that
 says the job is easier to choose than one that says the method. The Params page
 follows along rather than showing the numbers from before.
 
-Three switches sit at the bottom of the Status tab, where the state they affect
-is already on screen: **Thinking**, **Canvas** and **Speech**. Thinking off sets
+**Each panel is headed with its own name** — Status, Models, Params, Agents and
+so on. The rail is icons, and an icon you have to hover to identify is a puzzle
+rather than a label: the tooltip says what it is, but only to someone who
+already suspected.
+
+Four switches sit at the bottom of the Status tab, where the state they affect
+is already on screen: **Think**, **Canvas**, **Plan** and **TTS**. The last is named for what it is
+rather than what it does — "Speak" sat beside a Speak button that reads one
+reply on request, where the switch reads every reply as it finishes. Plan off takes the checklist and
+its four tools away entirely — 88 tokens of prompt, and no plan machinery for a
+conversation that is a question rather than a project. Thinking off sets
 the mode to `off`; on returns it to `auto`, which leaves the decision to the
 model rather than forcing a model that does not reason to pretend.
 
