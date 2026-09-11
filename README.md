@@ -1,9 +1,23 @@
 # Kestrel
 
-An agentic harness for llama.cpp that fits the context window you actually have,
-runs a single model across several machines, and keeps what it learns between
-sessions.
-
+### An agentic harness for llama.cpp, features include:
+```
+1. load a model larger than your VRAM by using system RAM along side VRAM,
+2. fit the context window to the hardware you actually have (will warn if context window is too big and offer a workable size),
+3. run a single model across several machines and keeps what it learns between sessions,
+4. split MOE so active experts are in VRAM and sleeping experts are in system RAM,
+5. offload KV Cache to system RAM,
+6. download models directly from HuggingFace with a built-in model broswer,
+7. a canvas that models and Humans can direclty input to,
+8. plan mode that Humans can modify,
+9. local TTS and STT options,
+10. configurable agents & personas,
+11. OpenAI compatible skille & tools
+12. several theme options,
+13. selectable workspace with guards (agents cannot opperate outside the workspace folder)
+14. full Human readable & editable prompt,
+15. much much more..
+```
 ---
 
 ## Contents
