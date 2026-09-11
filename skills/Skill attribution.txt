@@ -3,3 +3,6 @@ https://github.com/ZeroPointRepo/awesome-hermes-skills
 
 book-to-skill:
 https://github.com/virgiliojr94/book-to-skill
+
+scientific-research:
+https://github.com/K-Dense-AI/scientific-agent-skills
