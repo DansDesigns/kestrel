@@ -11,3 +11,5 @@ skills/book-to-skill/
 /kestrel/tools/__pycache__
 /kestrel/tools/__pycache__
 /kestrel/ui/__pycache__
+/dist/Kestrel/_internal
+/installer_build

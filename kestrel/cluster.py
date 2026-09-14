@@ -779,15 +779,46 @@ class LocalNode:
 
 
 def _best_local_ip() -> str:
-    """The address other machines would reach this one on."""
+    """The address other machines on this network would reach this one on.
+
+    Found by asking the interfaces, not by opening a socket towards a public
+    address. The socket trick is shorter, but "connect to 8.8.8.8 and see which
+    way the packet would have gone" is also what a great deal of malware does
+    to check it is online — Windows Defender weighs that pattern, and a
+    local-first tool has no business naming Google's servers in the first
+    place.
+    """
+    candidates: list[str] = []
     try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("8.8.8.8", 80))       # no packet is sent
-        address = probe.getsockname()[0]
-        probe.close()
-        return address
-    except OSError:
-        return socket.gethostbyname(socket.gethostname())
+        import psutil
+        for name, addresses in psutil.net_if_addrs().items():
+            for address in addresses:
+                if getattr(address, "family", None) == socket.AF_INET:
+                    candidates.append(address.address)
+    except Exception:
+        pass
+    if not candidates:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None,
+                                           socket.AF_INET):
+                candidates.append(info[4][0])
+        except OSError:
+            pass
+
+    private = [a for a in candidates
+               if a.startswith(("192.168.", "10."))
+               or (a.startswith("172.") and 16 <= int(a.split(".")[1]) <= 31)]
+    for address in private:
+        # A real network before a virtual one: Hyper-V and WSL adapters answer
+        # first and are reachable by nobody.
+        if not address.startswith(("172.17.", "172.18.", "192.168.56.")):
+            return address
+    if private:
+        return private[0]
+    for address in candidates:
+        if not address.startswith("127."):
+            return address
+    return "127.0.0.1"
 
 
 def _total_memory_mb() -> int:
