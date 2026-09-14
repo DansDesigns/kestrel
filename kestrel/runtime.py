@@ -51,6 +51,14 @@ class Runtime:
     gpu_budget_mb: int = 0        # 0 = ask the device; otherwise an override
     cpu_moe: bool = False         # keep mixture-of-experts weights on the CPU
     chat_template: str = ""       # override a missing or broken one
+    # Speculative decoding: a small model guesses the next few tokens and the
+    # large one checks them all in a single pass. Accepted guesses cost almost
+    # nothing, so a run of predictable tokens arrives at the small model's
+    # speed rather than the large one's.
+    draft_model: str = ""         # the small model, or blank for none
+    draft_max: int = 16           # tokens to guess ahead
+    draft_min: int = 0            # stop drafting below this run length
+    draft_gpu_layers: int = -1    # -1 all, 0 none
     # What the recovery ladder changed to make a model fit. Kept because the
     # model needs it, recorded because these settings cost quality or speed and
     # nobody would guess they were still on a week later.
@@ -79,6 +87,12 @@ class Runtime:
         # Resolved by build_command, which knows the model and the device.
         if self.n_gpu_layers >= 0:
             a += ["-ngl", str(self.n_gpu_layers)]
+        if self.draft_model:
+            a += ["-md", self.draft_model,
+                  "--draft-max", str(self.draft_max),
+                  "--draft-min", str(self.draft_min)]
+            if self.draft_gpu_layers >= 0:
+                a += ["-ngld", str(self.draft_gpu_layers)]
         if self.chat_template:
             # A named template the server knows, used when the file's own is
             # missing or broken. Without the right turn markers the model
@@ -132,6 +146,12 @@ class Runtime:
             a += ["--rope-freq-scale", str(self.rope_freq_scale)]
         if self.yarn_orig_ctx:
             a += ["--yarn-orig-ctx", str(self.yarn_orig_ctx)]
+        if self.draft_model:
+            a += ["-md", self.draft_model,
+                  "--draft-max", str(self.draft_max),
+                  "--draft-min", str(self.draft_min)]
+            if self.draft_gpu_layers >= 0:
+                a += ["-ngld", str(self.draft_gpu_layers)]
         if self.chat_template:
             a += ["--chat-template", self.chat_template]
         if self.chat_template_file:

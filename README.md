@@ -1,25 +1,9 @@
 # Kestrel
 
-### An agentic harness for llama.cpp, features include:
-```
-1. load a model larger than your VRAM by using system RAM along side VRAM,
-2. fit the context window to the hardware you actually have (will warn if context window is too big and offer a workable size),
-3. run a single model across several machines and keeps what it learns between sessions,
-4. split MOE so active experts are in VRAM and sleeping experts are in system RAM,
-5. offload KV Cache to system RAM,
-6. download models directly from HuggingFace with a built-in model broswer,
-7. a canvas that models and Humans can direclty input to,
-8. plan mode that Humans can modify,
-9. local TTS and STT options,
-10. configurable agents & personas,
-11. OpenAI compatible skille & tools
-12. several theme options,
-13. selectable workspace with guards (agents cannot opperate outside the workspace folder)
-14. full Human readable & editable prompt,
-15. much much more..
-```
+An agentic harness for llama.cpp that fits the context window you actually have,
+runs a single model across several machines, and keeps what it learns between
+sessions.
 
-![Kestrel](Screenshot.png)
 ---
 
 ## Contents
@@ -1215,6 +1199,33 @@ not a template at all, or truncated mid-loop — and says so rather than leaving
 the output to be interpreted. **Chat template** in Params → Runtime supplies one
 by name (`chatml` suits most Qwen builds), which is passed to llama-server as
 `--chat-template`. The Models tab reports the state of it before loading.
+
+---
+
+### 10.1b Speculative decoding
+
+A small model guesses the next few tokens and the large one checks them all in
+one pass. Accepted guesses cost almost nothing, so a run of predictable tokens
+arrives at the small model's speed. **Draft model** in Params → Runtime takes
+the path; **Draft tokens** is how far ahead to guess.
+
+It only works between models that share a vocabulary — the large model checks
+the small one's guesses token for token, and if token 5,102 means different
+words to each of them every guess is rejected. Kestrel checks when the file is
+chosen rather than at load:
+
+> That draft model will not help: different vocabularies (151,936 against
+> 262,144) — a draft model has to come from the same family as the model it
+> drafts for
+
+It also refuses a draft larger than a third of the main model, where guessing
+costs about what it saves.
+
+Worth being honest about the gain on shared-memory hardware: the draft model
+needs its own room in a budget that is already full, and speculative decoding
+helps most where the text is predictable — code and structured output more than
+prose. `-ngld 0` keeps the draft on the CPU, which is usually the right trade
+when the GPU budget is the constraint.
 
 ---
 

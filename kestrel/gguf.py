@@ -538,3 +538,27 @@ def embedding_bytes(info: "GGUFInfo") -> int:
     # Embedding in, output out. Tied embeddings share one, so this is an upper
     # bound — which is the right way to be wrong when deciding what fits.
     return int(2 * info.vocab * info.n_embd * bits / 8)
+
+
+def draft_mismatch(main: "GGUFInfo", draft: "GGUFInfo") -> str:
+    """Why these two cannot draft for each other, or "" if they can.
+
+    Speculative decoding works by having the large model check the small one's
+    guesses token for token. That only means something if both use the same
+    vocabulary: otherwise token 5,102 is a different word to each of them,
+    every guess is rejected, and drafting costs time while saving none.
+    """
+    if not draft.path:
+        return ""
+    if main.vocab and draft.vocab and main.vocab != draft.vocab:
+        return (f"different vocabularies ({main.vocab:,} against "
+                f"{draft.vocab:,}) — a draft model has to come from the same "
+                "family as the model it drafts for")
+    if (main.architecture and draft.architecture
+            and main.architecture != draft.architecture):
+        return (f"different architectures ({main.architecture} against "
+                f"{draft.architecture})")
+    if draft.file_size and main.file_size and draft.file_size > main.file_size / 3:
+        return ("the draft model is not much smaller than the main one, so "
+                "guessing will cost about what it saves")
+    return ""

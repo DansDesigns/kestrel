@@ -483,6 +483,23 @@ class ParamsPanel(QWidget):
         self.budget_note.setWordWrap(True)
         form.addRow("", self.budget_note)
 
+        self.rt_draft = QLineEdit(rt.draft_model)
+        self.rt_draft.setPlaceholderText("none — a small model of the same family")
+        self.rt_draft.setToolTip(
+            "Speculative decoding: a small model guesses the next few tokens "
+            "and the large one checks them in one pass. Accepted guesses are "
+            "nearly free. It must share the main model's vocabulary.")
+        pick = QPushButton("Browse…")
+        pick.clicked.connect(self._pick_draft)
+        form.addRow("Draft model", _row(self.rt_draft, pick, stretch_last=False))
+
+        self.rt_draft_max = QSpinBox(); self.rt_draft_max.setRange(1, 64)
+        self.rt_draft_max.setValue(rt.draft_max)
+        self.rt_draft_max.setToolTip("How many tokens to guess ahead. More is "
+                                     "a bigger win when right and a bigger "
+                                     "waste when wrong.")
+        form.addRow("Draft tokens", self.rt_draft_max)
+
         self.rt_template = QComboBox()
         self.rt_template.setEditable(True)
         self.rt_template.addItems(["", "chatml", "llama3", "gemma", "mistral",
@@ -690,6 +707,8 @@ class ParamsPanel(QWidget):
         rt.tensor_split = self.rt_ts.text().strip()
         rt.gpu_budget_mb = self.rt_budget.value()
         rt.chat_template = self.rt_template.currentText().strip()
+        rt.draft_model = self.rt_draft.text().strip()
+        rt.draft_max = self.rt_draft_max.value()
         rt.no_kv_offload = self.rt_nkvo.isChecked()
         rt.cpu_moe = self.rt_cpumoe.isChecked()
         rt.rope_scaling = self.rt_rope.currentText()
@@ -815,6 +834,26 @@ class ParamsPanel(QWidget):
         lay.addWidget(apply_btn)
         lay.addStretch(1)
         return inner
+
+    def _pick_draft(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Draft model", str(Path.home()), "GGUF (*.gguf);;All files (*)")
+        if not path:
+            return
+        self.rt_draft.setText(path)
+        # Checked here rather than at load: a mismatch is a property of the two
+        # files, and finding out now is better than finding out in a failure.
+        try:
+            from ..gguf import read as read_gguf, draft_mismatch
+            main = read_gguf(self.cfg.model_path, want_template=False)
+            trouble = draft_mismatch(main, read_gguf(path, want_template=False))
+        except Exception:
+            trouble = ""
+        if trouble:
+            self.statusLine.emit(f"That draft model will not help: {trouble}")
+        else:
+            self.statusLine.emit("Draft model set — reload to use it")
+        self.apply_runtime()
 
     def _preset(self, name: str) -> None:
         self.cfg.sampling.preset(name)
