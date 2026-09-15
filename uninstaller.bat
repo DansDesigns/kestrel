@@ -2,61 +2,68 @@
 REM ============================================================
 REM  Uninstall Kestrel
 REM
-REM  Put this in the folder Kestrel was installed to and run it,
-REM  or run it from anywhere and give it the folder.
+REM  Run it from the folder Kestrel was installed to, or give it
+REM  the folder:
 REM
-REM  It removes Kestrel's own files and shortcuts. It does not
-REM  touch models, llama.cpp, or anything else on the machine,
-REM  and it asks before it deletes a folder.
+REM      uninstaller.bat "C:\Program Files\Kestrel"
+REM
+REM  Removes Kestrel's own files and shortcuts. Models, llama.cpp
+REM  and your saved conversations are left alone.
+REM
+REM  Folders like Program Files need administrator rights. This
+REM  asks for them rather than failing quietly — an uninstaller
+REM  that says "removed" while the folder is still there is worse
+REM  than one that refuses.
 REM ============================================================
 setlocal EnableDelayedExpansion
 
-REM --- which folder --------------------------------------------
 set "TARGET=%~dp0"
 if "%~1" neq "" set "TARGET=%~1"
-REM  Trailing slash off, or the comparisons below read oddly.
 if "!TARGET:~-1!"=="\" set "TARGET=!TARGET:~0,-1!"
 
 echo.
 echo   Uninstall Kestrel
 echo   -----------------
-echo.
 echo   Folder: !TARGET!
 echo.
 
-REM --- is this actually a Kestrel folder? ------------------------
-REM  Checked before anything is deleted. A mistyped path should end
-REM  in a refusal, not in somebody's Documents folder being emptied.
 if not exist "!TARGET!\kestrel\__init__.py" (
-    echo   That does not look like a Kestrel installation — there is
-    echo   no kestrel\__init__.py in it.
-    echo.
-    echo   Run this from inside the folder Kestrel was installed to,
-    echo   or pass the folder:
-    echo.
-    echo       uninstaller.bat "C:\path\to\Kestrel"
+    echo   That is not a Kestrel installation — there is no
+    echo   kestrel\__init__.py in it. Nothing was changed.
     echo.
     pause
     exit /b 1
 )
 
-REM --- what will go ----------------------------------------------
-echo   This will delete:
+REM --- can we write there? ---------------------------------------
+REM  Tested by trying, not guessed from the path: a folder can be
+REM  writable anywhere and read-only anywhere.
+set "WRITABLE=1"
+2>nul ( >"!TARGET!\.kestrel-write-test" echo. ) || set "WRITABLE=0"
+if exist "!TARGET!\.kestrel-write-test" del /f /q "!TARGET!\.kestrel-write-test" >nul 2>&1
+
+if "!WRITABLE!"=="0" (
+    if "%~2"=="elevated" (
+        echo   Even as administrator this folder cannot be written to.
+        echo   Something may have the files open — close Kestrel and
+        echo   any Explorer window showing that folder, then retry.
+        echo.
+        pause
+        exit /b 1
+    )
+    echo   This folder needs administrator rights. Asking for them...
+    echo.
+    powershell -NoProfile -Command ^
+        "Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList '\"!TARGET!\"','elevated'"
+    exit /b 0
+)
+
+echo   This removes:
+echo     the program, its Python libraries and its shortcuts
 echo.
-echo     !TARGET!\kestrel          the program
-echo     !TARGET!\.venv            its Python libraries
-echo     !TARGET!\assets           icons and sounds
-if exist "!TARGET!\launcher"  echo     !TARGET!\launcher         the built launcher
-if exist "!TARGET!\dist"      echo     !TARGET!\dist             a previous build
-echo     the desktop and Start menu shortcuts
-echo.
-echo   This will NOT touch:
-echo.
-echo     your models, wherever they are
-echo     llama.cpp
-echo     your workspaces and saved conversations
-echo     settings in %%APPDATA%%\kestrel — delete that folder by hand
-echo     if you want them gone too
+echo   This leaves alone:
+echo     your models, llama.cpp, your workspaces and conversations,
+echo     and your settings in %%APPDATA%%\kestrel
 echo.
 
 set /p "SURE=  Type YES to remove Kestrel: "
@@ -68,53 +75,60 @@ if /i not "!SURE!"=="YES" (
     exit /b 0
 )
 
-REM --- shortcuts, before the folder they point into disappears ----
+REM --- close it first, or locked files leave a half-deletion -------
+taskkill /im Kestrel.exe /f >nul 2>&1
+timeout /t 1 /nobreak >nul 2>&1
+
 echo.
 echo   Removing shortcuts...
-REM  Only ones named Kestrel, and only in Kestrel's own places. No
-REM  other program's entries are read or altered.
-if exist "%USERPROFILE%\Desktop\Kestrel.lnk" (
-    del /f /q "%USERPROFILE%\Desktop\Kestrel.lnk" 2>nul
-)
-if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel.lnk" (
-    del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel.lnk" 2>nul
-)
-if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel" (
-    rmdir /s /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel" 2>nul
-)
+if exist "%USERPROFILE%\Desktop\Kestrel.lnk" del /f /q "%USERPROFILE%\Desktop\Kestrel.lnk"
+if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel.lnk" del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel.lnk"
 
-REM --- the program ------------------------------------------------
 echo   Removing the program...
-
-REM  Kestrel may still be running, and a locked file would leave the
-REM  folder half-deleted. Asking it to close first is politer than
-REM  discovering the problem afterwards.
-taskkill /im Kestrel.exe /f >nul 2>&1
+set "FAILED="
 
 for %%D in (kestrel assets personas skills launcher launcher-build dist build .venv) do (
-    if exist "!TARGET!\%%D" rmdir /s /q "!TARGET!\%%D" 2>nul
+    if exist "!TARGET!\%%D" (
+        rmdir /s /q "!TARGET!\%%D" >nul 2>&1
+        REM  Checked afterwards rather than trusted: rmdir reports success
+        REM  even when it removed only part of a tree.
+        if exist "!TARGET!\%%D" set "FAILED=!FAILED! %%D"
+    )
 )
 for %%F in (kestrel-run.py installer.py build-exe.bat build-installer.bat ^
             install.bat install.sh run.bat run.sh node.bat node.sh ^
-            requirements.txt version.txt README.md LICENSE models.json) do (
-    if exist "!TARGET!\%%F" del /f /q "!TARGET!\%%F" 2>nul
+            requirements.txt version.txt README.md LICENSE models.json ^
+            Kestrel.spec Screenshot.png) do (
+    if exist "!TARGET!\%%F" (
+        del /f /q "!TARGET!\%%F" >nul 2>&1
+        if exist "!TARGET!\%%F" set "FAILED=!FAILED! %%F"
+    )
 )
 
-REM --- the folder itself, only if nothing of yours is left ---------
-REM  rmdir without /s refuses a folder that still has anything in it,
-REM  which is exactly the behaviour wanted: whatever you put there
-REM  stays, and so does the folder holding it.
-rmdir "!TARGET!" 2>nul
+REM --- the folder itself, only when nothing of yours is left -------
+rmdir "!TARGET!" >nul 2>&1
 
 echo.
+if defined FAILED (
+    echo   Some things could not be removed:
+    echo    !FAILED!
+    echo.
+    echo   The usual cause is a file still in use. Close Kestrel and
+    echo   anything looking at that folder — Explorer windows and
+    echo   editors included — then run this again.
+    echo.
+    pause
+    exit /b 1
+)
+
 if exist "!TARGET!" (
-    echo   Kestrel is removed. The folder was kept because there is
-    echo   still something in it:
+    echo   Kestrel is removed. The folder was kept because something
+    echo   else is in it:
     echo.
-    dir /b "!TARGET!" 2>nul
+    dir /b "!TARGET!"
     echo.
-    echo   Those are yours — delete the folder by hand if you want
-    echo   them gone.
+    echo   Those are yours. Delete the folder by hand if you want them
+    echo   gone too.
 ) else (
     echo   Kestrel is removed, and the folder with it.
 )
@@ -122,6 +136,6 @@ if exist "!TARGET!" (
 echo.
 echo   Settings and conversation history are still in:
 echo     %APPDATA%\kestrel
-echo   Delete that folder if you want a completely clean slate.
+echo   Delete that folder for a completely clean slate.
 echo.
 pause

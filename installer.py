@@ -126,6 +126,9 @@ class Installer(tk.Tk):
         self.resizable(False, False)
         self.working = False
         self.python: Path | None = None
+        # Things that went wrong but did not stop the install, said at the end
+        # rather than swallowed.
+        self.problems: list[str] = []
 
         frame = ttk.Frame(self, padding=18)
         frame.pack(fill="both", expand=True)
@@ -229,9 +232,14 @@ class Installer(tk.Tk):
             messagebox.showerror("Could not install", str(e))
             return
         self.say("Done.", 100)
-        messagebox.showinfo(
-            APP, f"{APP} is installed in\n{target}\n\n"
-                 "Open it from the shortcut.")
+        if self.problems:
+            messagebox.showwarning(
+                f"{APP} installed, with a problem",
+                f"{APP} is in\n{target}\n\n" + "\n\n".join(self.problems))
+        else:
+            messagebox.showinfo(
+                APP, f"{APP} is installed in\n{target}\n\n"
+                     "Open it from the shortcut.")
         self.destroy()
 
     # -- the work ----------------------------------------------------------
@@ -259,6 +267,8 @@ class Installer(tk.Tk):
         if self.shortcut.get():
             self.say("Making shortcuts\u2026", 94)
             self._shortcut(target)
+            self.say("Checking them\u2026", 97)
+            self._verify(target)
         return target
 
     def _download(self) -> bytes:
@@ -360,25 +370,52 @@ class Installer(tk.Tk):
         if not entry.is_file():
             return None                 # older source: the shortcut falls back
 
-        self._run([str(python), "-m", "pip", "install", "--quiet", "pyinstaller"],
-                  "Could not install PyInstaller", tolerate=True)
+        got = subprocess.run(
+            [str(python), "-m", "pip", "install", "--quiet", "pyinstaller"],
+            capture_output=True, text=True, creationflags=QUIET)
+        if got.returncode != 0:
+            tail = (got.stderr or got.stdout or "").strip().splitlines()[-3:]
+            self.problems.append(
+                "PyInstaller could not be installed, so no launcher was built "
+                "and the taskbar will show Python's icon.\n\n"
+                + "\n".join(tail))
+            return None
         icon = target / "assets" / "kestrel.ico"
         command = [str(python), "-m", "PyInstaller", "--noconfirm", "--clean",
                    "--windowed", "--onedir", "--name", APP,
                    "--distpath", str(target / "launcher"),
                    "--workpath", str(target / "launcher-build"),
                    "--specpath", str(target / "launcher-build"),
+                   # Where the package actually is. PyInstaller has to import
+                   # kestrel to collect it, and the installed folder is not on
+                   # the path of the Python doing the building.
+                   "--paths", str(target),
                    "--collect-submodules", "kestrel"]
         if icon.is_file():
             command += ["--icon", str(icon)]
         command.append(str(entry))
         self.say("Building the launcher. A few minutes, once\u2026", 66)
-        self._run(command, "Could not build the launcher", tolerate=True)
+        # Run from inside the installed folder, so relative imports and the
+        # package itself resolve the way they will at runtime.
+        result = subprocess.run(command, capture_output=True, text=True,
+                                cwd=str(target), creationflags=QUIET)
 
         built = target / "launcher" / APP / f"{APP}.exe"
         if built.is_file():
             shutil.rmtree(target / "launcher-build", ignore_errors=True)
             return built
+
+        # Not silent. Falling back to pythonw leaves the taskbar showing
+        # Python, which is the one thing the launcher exists to prevent — and
+        # a failure nobody is told about looks exactly like the fix not
+        # working.
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-4:]
+        self.problems.append(
+            "The launcher could not be built, so the shortcut runs Python "
+            "instead and the taskbar will show Python's icon.\n\n"
+            + "\n".join(tail)
+            + "\n\nRunning this installer again over the same folder will "
+              "try the build once more.")
         return None
 
     def _llama(self, target: Path) -> None:
@@ -430,11 +467,7 @@ class Installer(tk.Tk):
             runner = built if built.is_file() else \
                 target / ".venv" / "Scripts" / "pythonw.exe"
             arguments = "" if built.is_file() else "-m kestrel"
-            places = [
-                Path.home() / "Desktop" / f"{APP}.lnk",
-                Path(os.environ.get("APPDATA", Path.home())) / "Microsoft"
-                / "Windows" / "Start Menu" / "Programs" / f"{APP}.lnk"]
-            for link in places:
+            for link in self._shortcut_paths():
                 link.parent.mkdir(parents=True, exist_ok=True)
                 # The shortcut carries the same application identity the
                 # program claims at startup. Windows matches a running window
@@ -464,6 +497,45 @@ class Installer(tk.Tk):
                 f"Icon={icon}\nTerminal=false\nCategories=Development;\n",
                 "utf-8")
 
+    def _verify(self, target: Path) -> None:
+        """Read the shortcuts back and check they point where intended.
+
+        Writing a shortcut can succeed and still leave it pointing at the
+        wrong thing — a path with a quote in it, a build that produced nothing.
+        The symptom is the taskbar showing Python, which looks like the fix not
+        working rather than the shortcut not being written. Reading it back
+        turns that into something the installer can say out loud.
+        """
+        if not WINDOWS:
+            return
+        built = target / "launcher" / APP / f"{APP}.exe"
+        if not built.is_file():
+            return                    # already reported when the build failed
+        for link in self._shortcut_paths():
+            if not link.is_file():
+                continue
+            script = ("(New-Object -COM WScript.Shell)"
+                      f".CreateShortcut('{link}').TargetPath")
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, creationflags=QUIET)
+            points_at = result.stdout.strip()
+            if points_at and Path(points_at) != built:
+                self.problems.append(
+                    f"The {link.stem} shortcut points at\n{points_at}\n"
+                    f"rather than\n{built}\n\n"
+                    "The taskbar will show that program's icon instead of "
+                    "Kestrel's.")
+
+    def _shortcut_paths(self) -> list[Path]:
+        places = []
+        if WINDOWS:
+            places.append(Path.home() / "Desktop" / f"{APP}.lnk")
+            places.append(
+                Path(os.environ.get("APPDATA", Path.home())) / "Microsoft"
+                / "Windows" / "Start Menu" / "Programs" / f"{APP}.lnk")
+        return places
+
     def _run(self, command: list[str], complaint: str,
              tolerate: bool = False) -> None:
         result = subprocess.run(command, capture_output=True, text=True,
@@ -479,6 +551,7 @@ class Installer(tk.Tk):
 UNINSTALL_BAT = r"""@echo off
 setlocal EnableDelayedExpansion
 set "TARGET=%~dp0"
+if "%~1" neq "" set "TARGET=%~1"
 if "!TARGET:~-1!"=="\" set "TARGET=!TARGET:~0,-1!"
 echo.
 echo   Uninstall {APP}
@@ -488,6 +561,21 @@ if not exist "!TARGET!\kestrel\__init__.py" (
     echo   That is not a {APP} installation. Nothing was changed.
     pause
     exit /b 1
+)
+set "WRITABLE=1"
+2>nul ( >"!TARGET!\.write-test" echo. ) || set "WRITABLE=0"
+if exist "!TARGET!\.write-test" del /f /q "!TARGET!\.write-test" >nul 2>&1
+if "!WRITABLE!"=="0" (
+    if "%~2"=="elevated" (
+        echo   Even as administrator this folder cannot be written to.
+        echo   Close {APP} and anything showing that folder, then retry.
+        pause
+        exit /b 1
+    )
+    echo   This folder needs administrator rights. Asking for them...
+    powershell -NoProfile -Command ^
+        "Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList '\"!TARGET!\"','elevated'"
+    exit /b 0
 )
 echo   This removes the program, its Python libraries and its
 echo   shortcuts. Your models, llama.cpp and your conversations
@@ -500,18 +588,32 @@ if /i not "!SURE!"=="YES" (
     exit /b 0
 )
 taskkill /im {APP}.exe /f >nul 2>&1
-del /f /q "%USERPROFILE%\Desktop\{APP}.lnk" 2>nul
-del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\{APP}.lnk" 2>nul
+del /f /q "%USERPROFILE%\Desktop\{APP}.lnk" >nul 2>&1
+del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\{APP}.lnk" >nul 2>&1
+set "FAILED="
 for %%D in (kestrel assets personas skills launcher launcher-build .venv) do (
-    if exist "!TARGET!\%%D" rmdir /s /q "!TARGET!\%%D" 2>nul
+    if exist "!TARGET!\%%D" (
+        rmdir /s /q "!TARGET!\%%D" >nul 2>&1
+        if exist "!TARGET!\%%D" set "FAILED=!FAILED! %%D"
+    )
 )
 for %%F in (kestrel-run.py installer.py install.bat install.sh run.bat run.sh ^
             node.bat node.sh requirements.txt version.txt README.md LICENSE) do (
-    if exist "!TARGET!\%%F" del /f /q "!TARGET!\%%F" 2>nul
+    if exist "!TARGET!\%%F" (
+        del /f /q "!TARGET!\%%F" >nul 2>&1
+        if exist "!TARGET!\%%F" set "FAILED=!FAILED! %%F"
+    )
 )
-rmdir "!TARGET!" 2>nul
+rmdir "!TARGET!" >nul 2>&1
 echo.
-echo   {APP} is removed. Settings and history remain in:
+if defined FAILED (
+    echo   Some things could not be removed:
+    echo    !FAILED!
+    echo   Usually a file still in use. Close {APP} and retry.
+    pause
+    exit /b 1
+)
+echo   {APP} is removed. Settings remain in:
 echo     %APPDATA%\kestrel
 echo.
 pause
