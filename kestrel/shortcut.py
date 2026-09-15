@@ -21,10 +21,56 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def launcher() -> Path:
-    """The script a menu entry should run, preferring the one that activates the
-    virtual environment over the bare interpreter."""
+def launch_command() -> tuple[Path, str, bool]:
+    """What a shortcut should run: (target, arguments, opens a console).
+
+    In order of preference:
+
+    1. The built executable. Its own icon, its own name in the taskbar.
+    2. pythonw from the virtual environment, running the package. No console
+       window, and the program claims its own identity at startup.
+    3. run.bat, which works everywhere but opens a console behind the
+       interface — hence the minimised window style when it is used.
+    """
     root = project_root()
+    if os.name == "nt":
+        for candidate in (root / "Kestrel.exe",
+                          root / "dist" / "Kestrel" / "Kestrel.exe"):
+            if candidate.exists():
+                return candidate, "", False
+        pythonw = root / ".venv" / "Scripts" / "pythonw.exe"
+        if pythonw.exists():
+            return pythonw, "-m kestrel", False
+        return (root / "run.bat"), "", True
+    built = root / "dist" / "Kestrel" / "Kestrel"
+    if built.exists():
+        return built, "", False
+    python = root / ".venv" / "bin" / "python"
+    if python.exists():
+        return python, "-m kestrel", False
+    return (root / "run.sh"), "", True
+
+
+def launcher() -> Path:
+    """What a menu entry should run.
+
+    The built executable first, when there is one: a shortcut to a script runs
+    Kestrel as the Python interpreter, and Windows then shows the interpreter's
+    icon in the taskbar and groups the window with any other Python program.
+    Nothing inside the application can correct that — the identity belongs to
+    the process. Failing that, the script that activates the virtual
+    environment, and failing that the folder.
+    """
+    root = project_root()
+    if os.name == "nt":
+        for candidate in (root / "Kestrel.exe",
+                          root / "dist" / "Kestrel" / "Kestrel.exe"):
+            if candidate.exists():
+                return candidate
+    else:
+        built = root / "dist" / "Kestrel" / "Kestrel"
+        if built.exists():
+            return built
     name = "run.bat" if os.name == "nt" else "run.sh"
     candidate = root / name
     return candidate if candidate.exists() else root
@@ -100,7 +146,7 @@ def windows_target() -> Path:
 def install_windows() -> Path:
     target = windows_target()
     target.parent.mkdir(parents=True, exist_ok=True)
-    run = launcher()
+    run, arguments, console = launch_command()
     icon = icon_path("ico")
     # WScript.Shell is present on every supported Windows and needs no
     # dependency, unlike pywin32.
@@ -109,8 +155,12 @@ def install_windows() -> Path:
         "$s.TargetPath = '%s'" % run,
         "$s.WorkingDirectory = '%s'" % project_root(),
         "$s.Description = 'Agentic harness for llama.cpp'",
-        "$s.WindowStyle = 7",          # start minimised: run.bat opens a console
+        # Minimised only when the target opens a console of its own; a
+        # windowless launcher should start normally.
+        "$s.WindowStyle = %d" % (7 if console else 1),
     ]
+    if arguments:
+        script.append("$s.Arguments = '%s'" % arguments)
     if icon:
         script.append("$s.IconLocation = '%s'" % icon)
     script.append("$s.Save()")

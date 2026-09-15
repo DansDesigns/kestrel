@@ -483,5 +483,34 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
     if rpc:
         cmd += ["--rpc", rpc]
     if rt.extra_args.strip():
-        cmd += shlex.split(rt.extra_args.strip())
+        # Extra arguments are appended last, so anything they repeat wins by
+        # position — except that llama-server treats a second --rpc as an
+        # error rather than an override, and the load fails with a message
+        # about the flag rather than about the node list. Whatever Kestrel has
+        # already supplied is removed from the extras.
+        cmd += _without_repeats(shlex.split(rt.extra_args.strip()), cmd)
     return cmd
+
+
+# Flags that take a value and must not appear twice. Repeating most flags is
+# harmless — the last wins — but these are the ones that make llama-server
+# refuse to start.
+_SINGLE_USE = {"--rpc", "-m", "--model", "-c", "--ctx-size", "-ngl",
+               "--n-gpu-layers", "--host", "--port", "-md", "--model-draft",
+               "--chat-template", "-t", "--threads"}
+
+
+def _without_repeats(extras: list[str], already: list[str]) -> list[str]:
+    """Drop from `extras` any single-use flag that is already in the command."""
+    out: list[str] = []
+    skip = False
+    for index, token in enumerate(extras):
+        if skip:
+            skip = False
+            continue
+        if token in _SINGLE_USE and token in already:
+            # Take its value with it, when it has one.
+            skip = index + 1 < len(extras) and not extras[index + 1].startswith("-")
+            continue
+        out.append(token)
+    return out

@@ -11,7 +11,8 @@ from pathlib import Path
 from PySide6.QtCore import (QFileSystemWatcher, QObject, QSize, QThread, Qt,
                             QTimer, Signal, Slot)
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import (QAction, QDesktopServices, QKeySequence, QPixmap,
+from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
+                           QPixmap,
                            QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QScrollArea, QSizePolicy,
@@ -3571,9 +3572,52 @@ class MainWindow(QWidget):
         super().closeEvent(event)
 
 
+def claim_identity() -> None:
+    """Tell Windows this is Kestrel, before any window exists.
+
+    Without this the taskbar groups the window under whatever launched it —
+    pythonw.exe — and shows Python's name and icon however the shortcut is
+    set up, because the shortcut's icon applies to the shortcut and the
+    taskbar button belongs to the process.
+
+    Set here rather than only in kestrel-run.py: that file is the entry point
+    of the built exe, and a shortcut running `python -m kestrel` never passes
+    through it. Every route into the interface goes through this function.
+
+    Only Kestrel's own identity is set. Nothing else on the machine is read
+    or altered.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "AlterniTech.Kestrel")
+    except Exception:
+        pass
+
+
+def app_icon() -> QIcon:
+    """Kestrel's icon, from wherever it is installed."""
+    here = Path(__file__).resolve().parent.parent.parent
+    for name in ("kestrel.ico", "kestrel.png"):
+        candidate = here / "assets" / name
+        if candidate.is_file():
+            return QIcon(str(candidate))
+    return QIcon()
+
+
 def main(argv: list[str] | None = None) -> int:
+    claim_identity()
     app = QApplication(sys.argv if argv is None else [sys.argv[0]] + list(argv))
     app.setApplicationName("Kestrel")
+    app.setApplicationDisplayName("Kestrel")
+    # The name a Linux desktop matches against its .desktop file, which is how
+    # the icon is found there.
+    app.setDesktopFileName("kestrel")
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     cfg = Config.load()
     app.setStyleSheet(theme.apply(cfg.theme, ui=cfg.ui_font, mono=cfg.mono_font,
                                   size=cfg.font_size, tint_name=cfg.ui_tint,
