@@ -7,6 +7,8 @@ manager owns the transfers, and reopening rebuilds the view from it.
 """
 from __future__ import annotations
 
+import re
+
 import threading
 from pathlib import Path
 
@@ -16,13 +18,46 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QMessageBox, QProgressBar,
-                               QPushButton, QSplitter, QTabWidget, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QFrame, QPushButton, QSplitter, QTabWidget,
+                               QTextEdit, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import downloads as dl
 from .. import models as modelsmod
 from . import theme
 from .widgets import mono_font, stretch_columns
+
+
+# Roughly what each quantisation costs, in the terms that matter when choosing
+# one: how much quality goes, and whether it will fit. Deliberately plain —
+# these are rules of thumb, not measurements.
+_QUANT_NOTES = {
+    "Q2": "very small, noticeably worse",
+    "Q3": "small, some quality lost",
+    "Q4": "the usual choice — little lost, fits most machines",
+    "Q5": "slightly better than Q4, slightly larger",
+    "Q6": "close to the original, larger again",
+    "Q8": "hard to tell from the original, twice the size of Q4",
+    "F16": "the original weights, no quantisation",
+    "BF16": "the original weights, no quantisation",
+    "F32": "the original at full precision, rarely worth it",
+}
+
+
+def _quant_of(name: str) -> str:
+    """The quantisation in a GGUF filename, as it is written there."""
+    match = re.search(r"(?:^|[.\-_])((?:IQ|Q)\d+(?:_[A-Z0-9]+)*|BF16|F16|F32)",
+                      name, re.I)
+    return match.group(1).upper() if match else "unknown"
+
+
+def _quant_note(quant: str) -> str:
+    for prefix, note in _QUANT_NOTES.items():
+        if quant.upper().startswith(prefix):
+            return note
+    if quant.upper().startswith("IQ"):
+        return "smaller than the Q of the same number, slower on some hardware"
+    return ""
 
 
 class DownloadsWindow(QWidget):
@@ -123,6 +158,24 @@ class DownloadsWindow(QWidget):
         lists.setSizes([420, 420])
         lay.addWidget(lists, 1)
 
+        # What this model is, before committing to a download measured in tens
+        # of gigabytes. Hidden by default, like the one on the Models tab: the
+        # lists are what the page is for.
+        self.detail_btn = QPushButton("Details")
+        self.detail_btn.setCheckable(True)
+        self.detail_btn.setToolTip("What is in the selected repository")
+        self.detail_btn.toggled.connect(self._toggle_detail)
+        lay.addWidget(self.detail_btn)
+
+        self.detail = QTextEdit()
+        self.detail.setObjectName("Flush")
+        self.detail.setReadOnly(True)
+        self.detail.setFont(mono_font(10))
+        self.detail.setFrameShape(QFrame.NoFrame)
+        self.detail.setMaximumHeight(150)
+        self.detail.hide()
+        lay.addWidget(self.detail)
+
         self.dest = QLineEdit(self.cfg.model_dirs[0] if self.cfg.model_dirs else "")
         browse = QPushButton("…")
         browse.setMaximumWidth(36)
@@ -137,6 +190,77 @@ class DownloadsWindow(QWidget):
         row2.addWidget(queue)
         lay.addLayout(row2)
         return w
+
+    def _detail_for(self, repo: str, files) -> None:
+        """Fill the details box for the repository now showing."""
+        found = next((r for r in getattr(self, "repos", []) or []
+                      if r.id == repo), None)
+        if found is None:
+            # Searched by id rather than kept as state: the file list arrives
+            # from a thread, and the selection may have moved on since.
+            found = modelsmod.RepoResult(id=repo, files=list(files))
+        else:
+            found.files = list(files)
+        self.detail.setPlainText(self._describe(found))
+        self.detail.setVisible(self.detail_btn.isChecked())
+
+    def _toggle_detail(self, shown: bool) -> None:
+        self.detail.setVisible(shown and bool(self.detail.toPlainText().strip()))
+        self.detail_btn.setText("Hide details" if shown else "Details")
+
+    def _describe(self, repo) -> str:
+        """What can be said about a repository from its listing alone.
+
+        No extra requests: the file list is already here, and it carries more
+        than it looks. Quantisations, whether the weights are split across
+        parts, whether there is a projector for images, the spread from
+        smallest to largest — all of it decides whether a download is worth
+        starting, and all of it is in the names and sizes.
+        """
+        files = list(getattr(repo, "files", []) or [])
+        weights = [f for f in files if f.name.lower().endswith(".gguf")]
+        lines = [f"{repo.id}"]
+        if repo.downloads or repo.likes:
+            lines.append(f"{repo.downloads:,} downloads · {repo.likes:,} likes"
+                         + (f" · updated {repo.updated[:10]}" if repo.updated
+                            else ""))
+        if not weights:
+            other = ", ".join(sorted({Path(f.name).suffix.lstrip(".")
+                                      for f in files if Path(f.name).suffix})
+                              )[:60]
+            lines.append("")
+            lines.append("No GGUF files here — Kestrel runs GGUF through "
+                         "llama.cpp.")
+            if other:
+                lines.append(f"This repository holds: {other}")
+            return "\n".join(lines)
+
+        quants = {}
+        for f in weights:
+            quants.setdefault(_quant_of(f.name), []).append(f)
+        total = sum(f.size for f in weights)
+        lines.append("")
+        lines.append(f"{len(weights)} GGUF file(s), "
+                     f"{modelsmod.human_size(total)} in total")
+
+        projector = [f for f in files if "mmproj" in f.name.lower()]
+        if projector:
+            lines.append("Includes a vision projector (mmproj) — this model "
+                         "can read images.")
+        shards = [f for f in weights if re.search(r"-\d{5}-of-\d{5}", f.name)]
+        if shards:
+            lines.append("Some weights are split across parts; all parts of a "
+                         "set are needed.")
+
+        lines.append("")
+        lines.append("Quantisation      Size        What it costs")
+        for name in sorted(quants, key=lambda q: sum(
+                f.size for f in quants[q])):
+            group = quants[name]
+            size = sum(f.size for f in group)
+            lines.append(f"{name:<17} {modelsmod.human_size(size):<11} "
+                         f"{_quant_note(name)}")
+        return "\n".join(lines)
 
     def _pick_dest(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Save models to",
@@ -222,6 +346,7 @@ class DownloadsWindow(QWidget):
             self.file_list.addTopLevelItem(item)
         self.status.setText(f"{len(files)} file(s) in {repo}. "
                             "Select one or more, or double-click to start.")
+        self._detail_for(repo, files)
 
     def queue_selected(self) -> None:
         chosen = self.file_list.selectedItems()
