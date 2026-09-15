@@ -51,11 +51,23 @@ if "!WRITABLE!"=="0" (
         pause
         exit /b 1
     )
-    echo   This folder needs administrator rights. Asking for them...
+    REM  Not relaunched automatically. Passing a path with spaces through
+    REM  PowerShell, through UAC, and back into cmd loses a quote somewhere
+    REM  and the new window closes before anything is printed — which looks
+    REM  exactly like the uninstaller doing nothing. Asking is slower and
+    REM  always works.
+    echo   This folder needs administrator rights.
     echo.
-    powershell -NoProfile -Command ^
-        "Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList '\"!TARGET!\"','elevated'"
-    exit /b 0
+    echo   Close this window, then right-click uninstaller.bat and choose
+    echo     Run as administrator
+    echo.
+    echo   If it is not in that folder, run it like this from an
+    echo   administrator Command Prompt:
+    echo.
+    echo     "%~f0" "!TARGET!"
+    echo.
+    pause
+    exit /b 1
 )
 
 echo   This removes:
@@ -87,7 +99,7 @@ if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Kestrel.lnk" del /f /q
 echo   Removing the program...
 set "FAILED="
 
-for %%D in (kestrel assets personas skills launcher launcher-build dist build .venv) do (
+for %%D in (kestrel assets personas skills _internal launcher launcher-build dist build .venv) do (
     if exist "!TARGET!\%%D" (
         rmdir /s /q "!TARGET!\%%D" >nul 2>&1
         REM  Checked afterwards rather than trusted: rmdir reports success
@@ -98,7 +110,7 @@ for %%D in (kestrel assets personas skills launcher launcher-build dist build .v
 for %%F in (kestrel-run.py installer.py build-exe.bat build-installer.bat ^
             install.bat install.sh run.bat run.sh node.bat node.sh ^
             requirements.txt version.txt README.md LICENSE models.json ^
-            Kestrel.spec Screenshot.png) do (
+            Kestrel.spec Screenshot.png Kestrel.exe) do (
     if exist "!TARGET!\%%F" (
         del /f /q "!TARGET!\%%F" >nul 2>&1
         if exist "!TARGET!\%%F" set "FAILED=!FAILED! %%F"

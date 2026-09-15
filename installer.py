@@ -112,6 +112,22 @@ def usable_python() -> tuple[Path | None, str]:
 
 
 # -------------------------------------------------------------------- ui ---
+def _pip_subject(line: str) -> str:
+    """The library pip is working on, from a line of its output."""
+    for prefix in ("Collecting ", "Downloading ", "Building wheel for ",
+                   "Installing collected packages: "):
+        if line.startswith(prefix):
+            rest = line[len(prefix):]
+            # "PySide6-6.11.2-cp39-abi3-win_amd64.whl (72.4 MB)" and
+            # "PySide6>=6.6" both want to read as PySide6.
+            name = rest.split(",")[0].split()[0]
+            for separator in ("==", ">=", "<=", "~=", ">", "<", "-"):
+                if separator in name:
+                    name = name.split(separator)[0]
+            return name.strip()
+    return ""
+
+
 def default_target() -> Path:
     if WINDOWS:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home())
@@ -251,6 +267,9 @@ class Installer(tk.Tk):
         self.say("Unpacking\u2026", 30)
         self._unpack(archive, target)
 
+        self.say("Tidying\u2026", 36)
+        self._prune(target)
+
         self.say("Installing the Python libraries. This is the slow part\u2026", 40)
         self._dependencies(target)
 
@@ -326,6 +345,29 @@ class Installer(tk.Tk):
                 with bundle.open(name) as source, open(destination, "wb") as out:
                     shutil.copyfileobj(source, out)
 
+    # Files that belong to developing Kestrel rather than running it. The
+    # download is the whole repository, which is the simplest thing to fetch
+    # and the wrong thing to leave lying in somebody's install.
+    DEVELOPMENT_ONLY = (
+        "install.bat", "install.sh", "build-exe.bat", "build-installer.bat",
+        "Kestrel.spec", "Screenshot.png", ".gitignore", ".gitattributes",
+        "models.json", "install-gui.py", "build-exe.py",
+    )
+
+    def _prune(self, target: Path) -> None:
+        """Remove what only a checkout needs."""
+        for name in self.DEVELOPMENT_ONLY:
+            path = target / name
+            try:
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass                  # not worth failing an install over
+        for folder in (".github", "tests", "docs"):
+            shutil.rmtree(target / folder, ignore_errors=True)
+
     def _dependencies(self, target: Path) -> None:
         """A virtual environment of Kestrel's own, and the libraries in it.
 
@@ -341,12 +383,12 @@ class Installer(tk.Tk):
         self._run([str(python), "-m", "pip", "install", "--upgrade", "pip"],
                   "Could not update pip", tolerate=True)
 
-        self.say("Installing PySide6 and the rest. Several minutes\u2026", 58)
+        self.say("Installing the Python libraries\u2026", 46)
         requirements = target / "requirements.txt"
         command = [str(python), "-m", "pip", "install"]
         command += (["-r", str(requirements)] if requirements.is_file()
                     else ["PySide6", "requests", "psutil"])
-        self._run(command, "Could not install the Python libraries")
+        self._pip(command)
 
     def _launcher(self, target: Path) -> Path | None:
         """Build Kestrel.exe with PyInstaller, in the installed folder.
@@ -368,7 +410,11 @@ class Installer(tk.Tk):
         python = target / ".venv" / "Scripts" / "python.exe"
         entry = target / "kestrel-run.py"
         if not entry.is_file():
-            return None                 # older source: the shortcut falls back
+            # Written rather than depended on. If the published source has not
+            # got it yet, silently skipping the build is how you end up with
+            # Python's icon and no explanation — the file is nine lines of
+            # bootstrap, so the installer simply provides it.
+            entry.write_text(run_entry_source(), "utf-8")
 
         got = subprocess.run(
             [str(python), "-m", "pip", "install", "--quiet", "pyinstaller"],
@@ -402,6 +448,7 @@ class Installer(tk.Tk):
 
         built = target / "launcher" / APP / f"{APP}.exe"
         if built.is_file():
+            built = self._surface(target, built)
             shutil.rmtree(target / "launcher-build", ignore_errors=True)
             return built
 
@@ -417,6 +464,56 @@ class Installer(tk.Tk):
             + "\n\nRunning this installer again over the same folder will "
               "try the build once more.")
         return None
+
+    def _pip(self, command: list[str]) -> None:
+        """Install, naming each library as pip reaches it.
+
+        pip says what it is doing; the installer was throwing that away and
+        showing one unchanging line for several minutes, which is
+        indistinguishable from being stuck. Reading its output back means the
+        slowest part of the install is also the part that visibly moves.
+        """
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, creationflags=QUIET)
+        tail: list[str] = []
+        done = 46
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            tail.append(line)
+            del tail[:-8]              # only the end matters if it fails
+            name = _pip_subject(line)
+            if name:
+                # Creeps towards the next stage rather than pretending to know
+                # how many libraries are left: pip does not say up front.
+                done = min(60, done + 1)
+                self.say(f"Installing Python library: {name}\u2026", done)
+        process.wait()
+        if process.returncode != 0:
+            raise RuntimeError("Could not install the Python libraries\n\n"
+                               + "\n".join(tail[-5:]))
+
+    def _surface(self, target: Path, built: Path) -> Path:
+        """Move the launcher up to the folder people actually open.
+
+        PyInstaller puts a one-folder build two levels down. The exe cannot
+        simply be lifted out on its own — it needs the `_internal` folder
+        beside it, and separating them gives the "Failed to load Python DLL"
+        error — so the whole contents move together.
+        """
+        produced = built.parent
+        for item in produced.iterdir():
+            destination = target / item.name
+            if destination.exists():
+                if destination.is_dir():
+                    shutil.rmtree(destination, ignore_errors=True)
+                else:
+                    destination.unlink()
+            shutil.move(str(item), str(destination))
+        shutil.rmtree(target / "launcher", ignore_errors=True)
+        return target / f"{APP}.exe"
 
     def _llama(self, target: Path) -> None:
         script = target / ("install.bat" if WINDOWS else "install.sh")
@@ -463,7 +560,7 @@ class Installer(tk.Tk):
             # The built launcher when there is one. Falling back to pythonw
             # leaves the taskbar showing Python, which is the whole reason the
             # launcher is built.
-            built = target / "launcher" / APP / f"{APP}.exe"
+            built = target / f"{APP}.exe"
             runner = built if built.is_file() else \
                 target / ".venv" / "Scripts" / "pythonw.exe"
             arguments = "" if built.is_file() else "-m kestrel"
@@ -508,7 +605,7 @@ class Installer(tk.Tk):
         """
         if not WINDOWS:
             return
-        built = target / "launcher" / APP / f"{APP}.exe"
+        built = target / f"{APP}.exe"
         if not built.is_file():
             return                    # already reported when the build failed
         for link in self._shortcut_paths():
@@ -548,6 +645,81 @@ class Installer(tk.Tk):
 # A short uninstaller, written only when the downloaded source did not bring
 # one. Deliberately plain: it refuses any folder that is not a Kestrel install,
 # asks before deleting, and leaves anything it did not put there.
+# The launcher's entry point, carried here so the installer does not
+# depend on the published source already containing it. Stored encoded
+# only because it contains triple quotes of its own, which would end the
+# string early — it is plain Python, written out verbatim.
+RUN_ENTRY_B64 = (
+    "IiIiRW50cnkgcG9pbnQgZm9yIHRoZSBidWlsdCBLZXN0cmVsLmV4ZS4KClR3byBqb2JzLCBib3Ro"
+    "IG9mIHdoaWNoIGV4aXN0IGJlY2F1c2Ugb2YgaG93IFdpbmRvd3MgdHJlYXRzIGEgcHJvZ3JhbSdz"
+    "CmlkZW50aXR5LgoKVGhlIGZpcnN0IGlzIHRoZSBpY29uLiBBIC5weSBmaWxlIGxhdW5jaGVkIHRo"
+    "cm91Z2ggdGhlIFB5dGhvbiBpbnRlcnByZXRlciBpcywKYXMgZmFyIGFzIFdpbmRvd3MgaXMgY29u"
+    "Y2VybmVkLCBQeXRob24gcnVubmluZyDigJQgdGhlIHRhc2tiYXIgc2hvd3MgUHl0aG9uJ3MKaWNv"
+    "biBhbmQgZ3JvdXBzIEtlc3RyZWwncyB3aW5kb3cgd2l0aCBhbnkgb3RoZXIgUHl0aG9uIHByb2dy"
+    "YW0uIE5vdGhpbmcgaW5zaWRlCnRoZSBhcHBsaWNhdGlvbiBjYW4gY29ycmVjdCB0aGF0LCBiZWNh"
+    "dXNlIHRoZSBpZGVudGl0eSBiZWxvbmdzIHRvIHRoZSBwcm9jZXNzLApub3QgdGhlIHdpbmRvdy4g"
+    "QSByZWFsIGV4ZWN1dGFibGUgd2l0aCBpdHMgb3duIGljb24gaXMgdGhlIG9ubHkgcmVsaWFibGUg"
+    "Zml4LgoKVGhlIHNlY29uZCBpcyB1cGRhdGluZy4gQSBmcm96ZW4gZXhlY3V0YWJsZSBub3JtYWxs"
+    "eSBjYXJyaWVzIGl0cyBvd24gY29weSBvZgpldmVyeSBtb2R1bGUsIHNvIHB1bGxpbmcgYSBuZXcg"
+    "dmVyc2lvbiBvZiB0aGUgc291cmNlIHdvdWxkIGNoYW5nZSBub3RoaW5nIHVudGlsCnRoZSBleGUg"
+    "d2FzIHJlYnVpbHQuIFRoZSBpbXBvcnQgaG9vayBiZWxvdyBwcmVmZXJzIGZpbGVzIG9uIGRpc2sg"
+    "YmVzaWRlIHRoZQpleGVjdXRhYmxlLCBzbyBhbiB1cGRhdGUgaXMgYSBnaXQgcHVsbCBhcyBpdCBh"
+    "bHdheXMgd2FzLCBhbmQgdGhlIGV4ZSBpcyBvbmx5CnJlYnVpbHQgd2hlbiB0aGUgbGF1bmNoZXIg"
+    "aXRzZWxmIGNoYW5nZXMuCiIiIgoKZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoK"
+    "aW1wb3J0IG9zCmltcG9ydCBzeXMKZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgoKZGVmIF9pbnN0"
+    "YWxsX2RpcigpIC0+IFBhdGg6CiAgICAiIiJXaGVyZSBLZXN0cmVsJ3Mgb3duIGZpbGVzIGxpdmUs"
+    "IGZyb3plbiBvciBub3QuIiIiCiAgICBpZiBnZXRhdHRyKHN5cywgImZyb3plbiIsIEZhbHNlKToK"
+    "ICAgICAgICAjIFRoZSBmb2xkZXIgaG9sZGluZyB0aGUgZXhlLCBub3QgdGhlIHRlbXBvcmFyeSB1"
+    "bnBhY2sgZGlyZWN0b3J5OiB0aGUKICAgICAgICAjIHBvaW50IGlzIHRvIGZpbmQgdGhlIHNvdXJj"
+    "ZSB0aGUgdXNlciBjYW4gZWRpdCBhbmQgdXBkYXRlLgogICAgICAgIHJldHVybiBQYXRoKHN5cy5l"
+    "eGVjdXRhYmxlKS5yZXNvbHZlKCkucGFyZW50CiAgICByZXR1cm4gUGF0aChfX2ZpbGVfXykucmVz"
+    "b2x2ZSgpLnBhcmVudAoKCmNsYXNzIF9EaXNrRmlyc3Q6CiAgICAiIiJJbXBvcnQgS2VzdHJlbCdz"
+    "IG1vZHVsZXMgZnJvbSBkaXNrIGluIHByZWZlcmVuY2UgdG8gdGhlIGJ1bmRsZS4KCiAgICBSZWdp"
+    "c3RlcmVkIGFoZWFkIG9mIFB5SW5zdGFsbGVyJ3Mgb3duIGZpbmRlci4gT25seSBga2VzdHJlbGAg"
+    "YW5kIGl0cwogICAgc3VibW9kdWxlcyBhcmUgYWZmZWN0ZWQg4oCUIGV2ZXJ5dGhpbmcgZWxzZSwg"
+    "UHlTaWRlNiBpbmNsdWRlZCwgc3RpbGwgY29tZXMKICAgIGZyb20gdGhlIGJ1bmRsZSwgd2hpY2gg"
+    "aXMgd2hhdCBrZWVwcyB0aGUgZXhlY3V0YWJsZSBzZWxmLWNvbnRhaW5lZC4KICAgICIiIgoKICAg"
+    "IGRlZiBfX2luaXRfXyhzZWxmLCByb290OiBQYXRoKToKICAgICAgICBzZWxmLnJvb3QgPSByb290"
+    "CgogICAgZGVmIGZpbmRfbW9kdWxlKHNlbGYsIG5hbWUsIHBhdGg9Tm9uZSk6ICAgICAgICAjIGxl"
+    "Z2FjeSBBUEksIHN0aWxsIGNhbGxlZAogICAgICAgIHJldHVybiBOb25lCgogICAgZGVmIGZpbmRf"
+    "c3BlYyhzZWxmLCBuYW1lLCBwYXRoPU5vbmUsIHRhcmdldD1Ob25lKToKICAgICAgICBpZiBuYW1l"
+    "ICE9ICJrZXN0cmVsIiBhbmQgbm90IG5hbWUuc3RhcnRzd2l0aCgia2VzdHJlbC4iKToKICAgICAg"
+    "ICAgICAgcmV0dXJuIE5vbmUKICAgICAgICBpbXBvcnQgaW1wb3J0bGliLm1hY2hpbmVyeSBhcyBt"
+    "YWNoaW5lcnkKICAgICAgICBpbXBvcnQgaW1wb3J0bGliLnV0aWwgYXMgdXRpbAoKICAgICAgICBy"
+    "ZWxhdGl2ZSA9IG5hbWUuc3BsaXQoIi4iKQogICAgICAgIGNhbmRpZGF0ZSA9IHNlbGYucm9vdC5q"
+    "b2lucGF0aCgqcmVsYXRpdmUpCiAgICAgICAgcGFja2FnZSA9IGNhbmRpZGF0ZSAvICJfX2luaXRf"
+    "Xy5weSIKICAgICAgICBtb2R1bGUgPSBjYW5kaWRhdGUud2l0aF9zdWZmaXgoIi5weSIpCiAgICAg"
+    "ICAgaWYgcGFja2FnZS5pc19maWxlKCk6CiAgICAgICAgICAgIHNwZWMgPSB1dGlsLnNwZWNfZnJv"
+    "bV9maWxlX2xvY2F0aW9uKAogICAgICAgICAgICAgICAgbmFtZSwgcGFja2FnZSwKICAgICAgICAg"
+    "ICAgICAgIHN1Ym1vZHVsZV9zZWFyY2hfbG9jYXRpb25zPVtzdHIoY2FuZGlkYXRlKV0sCiAgICAg"
+    "ICAgICAgICAgICBsb2FkZXI9bWFjaGluZXJ5LlNvdXJjZUZpbGVMb2FkZXIobmFtZSwgc3RyKHBh"
+    "Y2thZ2UpKSkKICAgICAgICAgICAgcmV0dXJuIHNwZWMKICAgICAgICBpZiBtb2R1bGUuaXNfZmls"
+    "ZSgpOgogICAgICAgICAgICByZXR1cm4gdXRpbC5zcGVjX2Zyb21fZmlsZV9sb2NhdGlvbigKICAg"
+    "ICAgICAgICAgICAgIG5hbWUsIG1vZHVsZSwKICAgICAgICAgICAgICAgIGxvYWRlcj1tYWNoaW5l"
+    "cnkuU291cmNlRmlsZUxvYWRlcihuYW1lLCBzdHIobW9kdWxlKSkpCiAgICAgICAgcmV0dXJuIE5v"
+    "bmUKCgpkZWYgbWFpbigpIC0+IGludDoKICAgIHJvb3QgPSBfaW5zdGFsbF9kaXIoKQogICAgaWYg"
+    "KHJvb3QgLyAia2VzdHJlbCIgLyAiX19pbml0X18ucHkiKS5pc19maWxlKCk6CiAgICAgICAgc3lz"
+    "Lm1ldGFfcGF0aC5pbnNlcnQoMCwgX0Rpc2tGaXJzdChyb290KSkKICAgICAgICBvcy5jaGRpcihy"
+    "b290KQoKICAgICMgV2luZG93cyBncm91cHMgdGFza2JhciBidXR0b25zIGJ5IGFwcGxpY2F0aW9u"
+    "IGlkZW50aXR5LCBhbmQgYSBwcm9ncmFtCiAgICAjIHRoYXQgZG9lcyBub3QgY2xhaW0gb25lIGlu"
+    "aGVyaXRzIHRoZSBpbnRlcnByZXRlcidzLiBTZXQgYmVmb3JlIGFueSB3aW5kb3cKICAgICMgZXhp"
+    "c3RzLCBhbmQgb25seSBldmVyIHRvIEtlc3RyZWwncyBvd24g4oCUIHN0YW1waW5nIGFuIGlkZW50"
+    "aXR5IG9udG8KICAgICMgYW55dGhpbmcgZWxzZSBpcyBob3cgb3RoZXIgYXBwbGljYXRpb25zJyBw"
+    "aW5uZWQgc2hvcnRjdXRzIGdldCBicm9rZW4uCiAgICBpZiBzeXMucGxhdGZvcm0gPT0gIndpbjMy"
+    "IjoKICAgICAgICB0cnk6CiAgICAgICAgICAgIGltcG9ydCBjdHlwZXMKICAgICAgICAgICAgY3R5"
+    "cGVzLndpbmRsbC5zaGVsbDMyLlNldEN1cnJlbnRQcm9jZXNzRXhwbGljaXRBcHBVc2VyTW9kZWxJ"
+    "RCgKICAgICAgICAgICAgICAgICJBbHRlcm5pVGVjaC5LZXN0cmVsIikKICAgICAgICBleGNlcHQg"
+    "RXhjZXB0aW9uOgogICAgICAgICAgICBwYXNzCgogICAgZnJvbSBrZXN0cmVsLl9fbWFpbl9fIGlt"
+    "cG9ydCBtYWluIGFzIGtlc3RyZWxfbWFpbgogICAgcmV0dXJuIGtlc3RyZWxfbWFpbigpCgoKaWYg"
+    "X19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIHJhaXNlIFN5c3RlbUV4aXQobWFpbigpKQo="
+)
+
+
+def run_entry_source() -> str:
+    import base64
+    return base64.b64decode(RUN_ENTRY_B64).decode("utf-8")
+
+
 UNINSTALL_BAT = r"""@echo off
 setlocal EnableDelayedExpansion
 set "TARGET=%~dp0"
@@ -566,16 +738,13 @@ set "WRITABLE=1"
 2>nul ( >"!TARGET!\.write-test" echo. ) || set "WRITABLE=0"
 if exist "!TARGET!\.write-test" del /f /q "!TARGET!\.write-test" >nul 2>&1
 if "!WRITABLE!"=="0" (
-    if "%~2"=="elevated" (
-        echo   Even as administrator this folder cannot be written to.
-        echo   Close {APP} and anything showing that folder, then retry.
-        pause
-        exit /b 1
-    )
-    echo   This folder needs administrator rights. Asking for them...
-    powershell -NoProfile -Command ^
-        "Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList '\"!TARGET!\"','elevated'"
-    exit /b 0
+    echo   This folder needs administrator rights.
+    echo.
+    echo   Close this window, then right-click this file and choose
+    echo     Run as administrator
+    echo.
+    pause
+    exit /b 1
 )
 echo   This removes the program, its Python libraries and its
 echo   shortcuts. Your models, llama.cpp and your conversations
@@ -591,14 +760,15 @@ taskkill /im {APP}.exe /f >nul 2>&1
 del /f /q "%USERPROFILE%\Desktop\{APP}.lnk" >nul 2>&1
 del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\{APP}.lnk" >nul 2>&1
 set "FAILED="
-for %%D in (kestrel assets personas skills launcher launcher-build .venv) do (
+for %%D in (kestrel assets personas skills _internal launcher launcher-build .venv) do (
     if exist "!TARGET!\%%D" (
         rmdir /s /q "!TARGET!\%%D" >nul 2>&1
         if exist "!TARGET!\%%D" set "FAILED=!FAILED! %%D"
     )
 )
 for %%F in (kestrel-run.py installer.py install.bat install.sh run.bat run.sh ^
-            node.bat node.sh requirements.txt version.txt README.md LICENSE) do (
+            node.bat node.sh requirements.txt version.txt README.md LICENSE ^
+            Kestrel.exe) do (
     if exist "!TARGET!\%%F" (
         del /f /q "!TARGET!\%%F" >nul 2>&1
         if exist "!TARGET!\%%F" set "FAILED=!FAILED! %%F"
