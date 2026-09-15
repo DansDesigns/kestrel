@@ -1,4 +1,6 @@
 # Kestrel
+![version](https://img.shields.io/badge/version-1.3.2-6f8ff0)
+
 
 An agentic harness for llama.cpp that fits the context window you actually have,
 runs a single model across several machines, and keeps what it learns between
