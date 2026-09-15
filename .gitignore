@@ -1,16 +1,38 @@
-/kestrel/tools/__pycache__
-/kestrel/__pycache__
-/kestrel/tools/__pycache__
-/kestrel/ui/__pycache__
-/kestrel/tools/__pycache__
-/kestrel/ui/__pycache__
-*.pyc
-*.pyc
-/kestrel/tools/__pycache__
-skills/book-to-skill/
-/kestrel/tools/__pycache__
-/kestrel/tools/__pycache__
-/kestrel/ui/__pycache__
-/dist/Kestrel/_internal
-/installer_build
-/kestrel/tools/__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller: every one of these is produced by a build and none of it
+# belongs in the repository. Kestrel.spec is written afresh on each run, and a
+# committed one silently overrides the flags the batch files pass.
+build/
+dist/
+launcher/
+launcher-build/
+installer_out/
+installer_build/
+*.spec
+Kestrel.exe
+Kestrel_Installer.exe
+_internal/
+
+# Archives of the repository, which the repository does not need
+*.zip
+*.tar.gz
+
+# Written at runtime, not by hand
+models.json
+HANDOVER.md
+PLAN.md
+THOUGHTS.md
+.kestrel/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
