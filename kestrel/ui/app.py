@@ -3589,6 +3589,13 @@ def claim_identity() -> None:
     """
     if sys.platform != "win32":
         return
+    if getattr(sys, "frozen", False):
+        # Not when running as Kestrel.exe. Windows already identifies the
+        # process by that executable, and the shortcut points at it — they
+        # match, and the taskbar uses the exe's own icon. Claiming a different
+        # identity breaks that match, and the button separates from the
+        # shortcut and falls back to the window icon.
+        return
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -3598,12 +3605,23 @@ def claim_identity() -> None:
 
 
 def app_icon() -> QIcon:
-    """Kestrel's icon, from wherever it is installed."""
-    here = Path(__file__).resolve().parent.parent.parent
-    for name in ("kestrel.ico", "kestrel.png"):
-        candidate = here / "assets" / name
-        if candidate.is_file():
-            return QIcon(str(candidate))
+    """Kestrel's icon, from wherever it is installed.
+
+    Frozen, the modules live inside _internal and walking up from __file__
+    lands in the wrong place — the folder beside the executable is the one
+    with assets in it.
+    """
+    roots = [Path(__file__).resolve().parent.parent.parent]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(sys.executable).resolve().parent)
+        bundled = getattr(sys, "_MEIPASS", "")
+        if bundled:
+            roots.insert(1, Path(bundled))
+    for root in roots:
+        for name in ("kestrel.ico", "kestrel.png"):
+            candidate = root / "assets" / name
+            if candidate.is_file():
+                return QIcon(str(candidate))
     return QIcon()
 
 

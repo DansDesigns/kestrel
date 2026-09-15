@@ -261,56 +261,46 @@ class Installer(tk.Tk):
     # -- the work ----------------------------------------------------------
     def _install(self) -> Path:
         target = Path(self.target.get()).expanduser()
-        self.say("Fetching the latest version\u2026", 5)
+        self.say("Downloading Kestrel", 5)
         archive = self._download()
 
-        self.say("Unpacking\u2026", 30)
+        self.say("Unpacking", 30)
         self._unpack(archive, target)
 
-        self.say("Tidying\u2026", 36)
+        self.say("Tidying up", 36)
         self._prune(target)
 
-        self.say("Installing the Python libraries. This is the slow part\u2026", 40)
+        self.say("Installing Python libraries", 40)
         self._dependencies(target)
 
-        self.say("Building the launcher\u2026", 62)
+        self.say("Building the launcher", 62)
         self._launcher(target)
 
         if self.llama.get():
-            self.say("Fetching llama.cpp\u2026", 78)
+            self.say("Downloading llama.cpp", 78)
             self._llama(target)
 
-        self.say("Writing the uninstaller\u2026", 88)
+        self.say("Writing the uninstaller", 88)
         self._uninstaller(target)
 
         if self.shortcut.get():
-            self.say("Making shortcuts\u2026", 94)
+            self.say("Making shortcuts", 94)
             self._shortcut(target)
-            self.say("Checking them\u2026", 97)
+            self.say("Checking the shortcuts", 97)
             self._verify(target)
         return target
 
     def _download(self) -> bytes:
-        """The source archive, from a release when there is one.
+        """The current source, from the branch.
 
-        A published release is a version somebody decided was ready; the branch
-        is whatever was committed last. Preferring the release means an install
-        done today and one done tomorrow give the same thing.
+        The branch rather than the latest release: a release is a snapshot from
+        whenever it was tagged, so anything added since — a new skill, a fix —
+        is simply absent, and the install looks incomplete for no visible
+        reason.
         """
-        url = SOURCE
         try:
             request = urllib.request.Request(
-                RELEASES, headers={"User-Agent": "Kestrel-Installer"})
-            with urllib.request.urlopen(request, timeout=20) as response:
-                latest = json.loads(response.read().decode("utf-8"))
-            if latest.get("zipball_url"):
-                url = latest["zipball_url"]
-        except Exception:
-            pass                     # no releases yet, or offline — try the branch
-
-        try:
-            request = urllib.request.Request(
-                url, headers={"User-Agent": "Kestrel-Installer"})
+                SOURCE, headers={"User-Agent": "Kestrel-Installer"})
             with urllib.request.urlopen(request, timeout=180) as response:
                 return response.read()
         except urllib.error.URLError as e:
@@ -383,7 +373,7 @@ class Installer(tk.Tk):
         self._run([str(python), "-m", "pip", "install", "--upgrade", "pip"],
                   "Could not update pip", tolerate=True)
 
-        self.say("Installing the Python libraries\u2026", 46)
+        self.say("Installing Python libraries", 46)
         requirements = target / "requirements.txt"
         command = [str(python), "-m", "pip", "install"]
         command += (["-r", str(requirements)] if requirements.is_file()
@@ -440,7 +430,7 @@ class Installer(tk.Tk):
         if icon.is_file():
             command += ["--icon", str(icon)]
         command.append(str(entry))
-        self.say("Building the launcher. A few minutes, once\u2026", 66)
+        self.say("Building the launcher", 66)
         # Run from inside the installed folder, so relative imports and the
         # package itself resolve the way they will at runtime.
         result = subprocess.run(command, capture_output=True, text=True,
@@ -489,7 +479,7 @@ class Installer(tk.Tk):
                 # Creeps towards the next stage rather than pretending to know
                 # how many libraries are left: pip does not say up front.
                 done = min(60, done + 1)
-                self.say(f"Installing Python library: {name}\u2026", done)
+                self.say(f"Installing {name}", done)
         process.wait()
         if process.returncode != 0:
             raise RuntimeError("Could not install the Python libraries\n\n"
