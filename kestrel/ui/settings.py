@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QMessageBox,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton,
-                               QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+                               QSpinBox, QTabWidget, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import speech as speechmod
 from . import theme
@@ -65,6 +66,8 @@ class SettingsDialog(QDialog):
 
     def __init__(self, cfg: Config, parent=None):
         super().__init__(parent)
+        self._skill_archive = b""
+        self._skill_list: list = []
         self._update_result.connect(self._show_update)
         self._update_line.connect(lambda line: self.update_log.appendPlainText(line))
         self._update_done.connect(self._update_finished)
@@ -79,6 +82,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._agent_tab(), "Agent")
         tabs.addTab(self._endpoint_tab(), "Endpoint")
         tabs.addTab(self._folders_tab(), "Folders")
+        tabs.addTab(self._skills_tab(), "Skills")
         tabs.addTab(self._updates_tab(), "Updates")
         tabs.addTab(self._about_tab(), "About")
 
@@ -431,6 +435,148 @@ class SettingsDialog(QDialog):
         credit.setObjectName("Dim")
         lay.addWidget(credit)
         return w
+
+    def _skills_tab(self) -> QWidget:
+        """Fetch skills from a GitHub repository."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        blurb = QLabel("Paste a GitHub address. Kestrel looks through the "
+                       "repository for skills and lists what it finds, so you "
+                       "can choose.")
+        blurb.setWordWrap(True)
+        blurb.setObjectName("Dim")
+        lay.addWidget(blurb)
+
+        row = QHBoxLayout()
+        self.skill_url = QLineEdit()
+        self.skill_url.setPlaceholderText("github.com/owner/repository")
+        self.skill_url.returnPressed.connect(self._look_for_skills)
+        row.addWidget(self.skill_url, 1)
+        self.skill_look = QPushButton("Look")
+        self.skill_look.clicked.connect(self._look_for_skills)
+        row.addWidget(self.skill_look)
+        lay.addLayout(row)
+
+        self.skill_found = QTreeWidget()
+        self.skill_found.setHeaderLabels(["", "Skill", "What it does"])
+        self.skill_found.setRootIsDecorated(False)
+        header = self.skill_found.header()
+        header.setStretchLastSection(True)
+        self.skill_found.setColumnWidth(0, 26)
+        self.skill_found.setColumnWidth(1, 150)
+        lay.addWidget(self.skill_found, 1)
+
+        self.skill_status = QLabel("")
+        self.skill_status.setObjectName("Dim")
+        self.skill_status.setWordWrap(True)
+        lay.addWidget(self.skill_status)
+
+        buttons = QHBoxLayout()
+        for text, slot in (("Select all", self._select_all_skills),
+                           ("Select none", self._select_no_skills)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        self.skill_get = QPushButton("Install the ticked skills")
+        self.skill_get.setEnabled(False)
+        self.skill_get.clicked.connect(self._install_skills)
+        buttons.addWidget(self.skill_get)
+        lay.addLayout(buttons)
+
+        caveat = QLabel(
+            "A skill that only reads and reasons will work anywhere. One that "
+            "runs its own bundled script may look for itself in another "
+            "agent's folders and not find it — its README says which kind it "
+            "is.")
+        caveat.setWordWrap(True)
+        caveat.setObjectName("Dim")
+        lay.addWidget(caveat)
+        return page
+
+    # -- fetching ------------------------------------------------------------
+    def _look_for_skills(self) -> None:
+        from .. import skillfetch
+        owner, repo = skillfetch.parse_repo(self.skill_url.text())
+        if not owner:
+            self.skill_status.setText(
+                "That does not look like a GitHub address. It should read "
+                "github.com/owner/repository.")
+            return
+        self.skill_found.clear()
+        self.skill_get.setEnabled(False)
+        self.skill_status.setText(f"Looking in {owner}/{repo}\u2026")
+        QApplication.processEvents()
+        try:
+            self._skill_archive = skillfetch.fetch(owner, repo)
+            self._skill_list = skillfetch.survey(self._skill_archive)
+        except Exception as e:
+            self._skill_archive = b""
+            self._skill_list = []
+            self.skill_status.setText(str(e))
+            return
+
+        if not self._skill_list:
+            hint = skillfetch.index_hint(self._skill_archive)
+            self.skill_status.setText(
+                hint or f"No skills in {owner}/{repo} — nothing in it has a "
+                        "SKILL.md.")
+            return
+
+        for skill in self._skill_list:
+            row = QTreeWidgetItem(["", skill.name, skill.description or "—"])
+            row.setCheckState(0, Qt.Checked)
+            note = f"{skill.files} file(s)"
+            if skill.requires:
+                note += f" · needs {', '.join(skill.requires)}"
+            row.setToolTip(1, note)
+            self.skill_found.addTopLevelItem(row)
+        self.skill_get.setEnabled(True)
+        self.skill_status.setText(
+            f"{len(self._skill_list)} skill(s) in {owner}/{repo}. "
+            "Untick anything you do not want.")
+
+    def _each_skill_row(self):
+        for i in range(self.skill_found.topLevelItemCount()):
+            yield self.skill_found.topLevelItem(i)
+
+    def _select_all_skills(self) -> None:
+        for row in self._each_skill_row():
+            row.setCheckState(0, Qt.Checked)
+
+    def _select_no_skills(self) -> None:
+        for row in self._each_skill_row():
+            row.setCheckState(0, Qt.Unchecked)
+
+    def _install_skills(self) -> None:
+        from .. import skillfetch
+        chosen = [skill for row, skill in
+                  zip(self._each_skill_row(), self._skill_list)
+                  if row.checkState(0) == Qt.Checked]
+        if not chosen:
+            self.skill_status.setText("Nothing is ticked.")
+            return
+        folder = Path(self.cfg.skills_dirs[0]) if self.cfg.skills_dirs \
+            else Path("skills")
+        if not folder.is_absolute():
+            folder = Path(self.cfg.workspace_root or ".") / folder
+        self.skill_get.setEnabled(False)
+        self.skill_status.setText(f"Installing into {folder}\u2026")
+        QApplication.processEvents()
+        try:
+            written = skillfetch.install(
+                self._skill_archive, chosen, folder,
+                on_step=lambda name: (
+                    self.skill_status.setText(f"Installed {name}"),
+                    QApplication.processEvents()))
+        except Exception as e:
+            self.skill_status.setText(f"Could not install: {e}")
+            self.skill_get.setEnabled(True)
+            return
+        self.skill_get.setEnabled(True)
+        self.skill_status.setText(
+            f"Installed {len(written)} skill(s) into {folder}. "
+            "They are available from the next message.")
 
     def _updates_tab(self) -> QWidget:
         w = QWidget()
