@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{BRAND_NAME}}</title>
+    <style>
+      /* Personal brand strategy document. One accent (green = proof from the
+     market). Keep this design as-is: fill the slots, repeat the marked
+     blocks, change nothing else. Light theme by default, dark via
+     prefers-color-scheme. */
+      :root {
+        --bg: #fafaf8;
+        --card: #ffffff;
+        --ink: #1a1a18;
+        --ink-2: #55554f;
+        --ink-3: #8a8a82;
+        --line: rgba(0, 0, 0, 0.09);
+        --accent: #09321f;
+        --accent-soft: rgba(9, 50, 31, 0.07);
+        --accent-line: rgba(9, 50, 31, 0.25);
+        --amber: #92600a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121211;
+          --card: #1b1b1a;
+          --ink: #f0efe9;
+          --ink-2: #b5b4ac;
+          --ink-3: #7d7c74;
+          --line: rgba(255, 255, 255, 0.1);
+          --accent: #73b490;
+          --accent-soft: rgba(115, 180, 144, 0.1);
+          --accent-line: rgba(115, 180, 144, 0.35);
+          --amber: #d9a44a;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.65 ui-sans-serif,
+          -apple-system,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .page {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 48px 24px 96px;
+      }
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--ink-3);
+      }
+      h1 {
+        font-size: 34px;
+        line-height: 1.12;
+        letter-spacing: -0.03em;
+        margin: 8px 0 10px;
+      }
+      .intro {
+        font-size: 17px;
+        color: var(--ink-2);
+        margin: 0 0 8px;
+      }
+      h2 {
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--ink-3);
+        margin: 44px 0 16px;
+        padding-top: 24px;
+        border-top: 1px solid var(--line);
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px 20px;
+        margin: 0 0 14px;
+      }
+      .summary li {
+        margin: 0 0 8px;
+        color: var(--ink-2);
+      }
+      .summary b {
+        color: var(--ink);
+        font-weight: 650;
+      }
+      .point {
+        font-size: 17px;
+        font-weight: 650;
+        letter-spacing: -0.015em;
+        margin: 0 0 6px;
+      }
+      .detail {
+        margin: 0 0 10px;
+        color: var(--ink-2);
+      }
+      .detail:last-child {
+        margin-bottom: 0;
+      }
+      .branch {
+        margin: 0 0 12px;
+      }
+      .branch:last-child {
+        margin-bottom: 0;
+      }
+      .chips {
+        margin-top: 6px;
+      }
+      .chip {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 3px 11px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        border: 1px solid var(--accent-line);
+        margin: 0 6px 6px 0;
+      }
+      .chip.quiet {
+        background: transparent;
+        color: var(--ink-2);
+        border-color: var(--line);
+        font-weight: 500;
+      }
+      .poles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      @media (max-width: 560px) {
+        .poles {
+          grid-template-columns: 1fr;
+        }
+      }
+      .pole-label {
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        font-weight: 700;
+        color: var(--amber);
+      }
+      .pole.toward .pole-label {
+        color: var(--accent);
+      }
+      .lens {
+        border-left: 3px solid var(--accent);
+        background: var(--accent-soft);
+        border-radius: 0 10px 10px 0;
+        padding: 8px 14px;
+        margin: 0 0 12px;
+        font-weight: 550;
+      }
+      ul.menu {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--ink-2);
+        columns: 2;
+        column-gap: 28px;
+        font-size: 14.5px;
+      }
+      @media (max-width: 560px) {
+        ul.menu {
+          columns: 1;
+        }
+      }
+      ul.menu li {
+        margin: 0 0 6px;
+        break-inside: avoid;
+      }
+      .receipt {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        padding: 7px 0;
+        border-top: 1px dashed var(--line);
+        font-size: 13.5px;
+      }
+      .receipt .who {
+        font-weight: 650;
+        white-space: nowrap;
+      }
+      .receipt .stat {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .receipt .note {
+        color: var(--ink-2);
+      }
+      .hook {
+        counter-increment: hook;
+      }
+      .hook .point::before {
+        content: counter(hook) ". ";
+        color: var(--ink-3);
+      }
+      .kv {
+        font-size: 13.5px;
+        margin: 4px 0;
+        color: var(--ink-2);
+      }
+      .kv b {
+        color: var(--ink);
+        font-weight: 650;
+      }
+      .coda {
+        background: var(--accent-soft);
+        border: 1px solid var(--accent-line);
+        border-radius: 14px;
+        padding: 18px 20px;
+        margin: 44px 0 0;
+        font-weight: 550;
+      }
+      .foot {
+        margin-top: 40px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="eyebrow">Personal brand strategy</div>
+      <h1>{{BRAND_NAME}}</h1>
+      <p class="intro">{{ONE_LINE_POSITIONING}}</p>
+
+      <h2>The short version</h2>
+      <div class="card">
+        <ul class="summary" style="margin: 0; padding-left: 18px">
+          <!-- REPEAT per summary line (6-7) -->
+          <li><b>{{LABEL}}:</b> {{ONE_SENTENCE}}</li>
+          <!-- /REPEAT -->
+        </ul>
+      </div>
+
+      <h2>1 · Your topic tree</h2>
+      <p class="detail">{{TREE_OPENER_ONE_LINE}}</p>
+      <!-- REPEAT per interest -->
+      <div class="card branch">
+        <div class="point">{{INTEREST}}</div>
+        <p class="detail">{{BRANCH_NOTE_OR_RESEARCH_SUPPORT}}</p>
+        <div class="chips">
+          <!-- REPEAT per topic; use class="chip quiet" for sub-topics -->
+          <span class="chip">{{TOPIC}}</span>
+          <span class="chip quiet">{{SUB_TOPIC_OR_TALKING_POINT}}</span>
+          <!-- /REPEAT -->
+        </div>
+      </div>
+      <!-- /REPEAT -->
+
+      <h2>2 · What you're building</h2>
+      <!-- Four blocks in this order: domain of mastery, who you're for,
+           your story, your mission. -->
+      <div class="card">
+        <div class="point">{{BLOCK_TITLE}}</div>
+        <p class="detail">{{BLOCK_PARAGRAPH}}</p>
+      </div>
+
+      <h2>3 · The two poles</h2>
+      <div class="poles">
+        <div class="card pole">
+          <div class="pole-label">Away from</div>
+          <div class="point">{{ANTI_VISION_NAME}}</div>
+          <p class="detail">{{ANTI_VISION_PARAGRAPH}}</p>
+        </div>
+        <div class="card pole toward">
+          <div class="pole-label">Toward</div>
+          <div class="point">{{VISION_NAME}}</div>
+          <p class="detail">{{VISION_PARAGRAPH}}</p>
+        </div>
+      </div>
+      <div class="lens">The lens: {{DOES_THIS_MOVE_THE_READER_FROM_A_TO_B}}</div>
+
+      <h2>4 · What to write about</h2>
+      <p class="detail">{{PERMISSION_LINE}}</p>
+      <div class="card">
+        <ul class="menu">
+          <!-- REPEAT per menu item -->
+          <li>{{MENU_ITEM}}</li>
+          <!-- /REPEAT -->
+        </ul>
+      </div>
+
+      <h2>5 · What's already working in your space</h2>
+      <!-- REPEAT per finding (3-5) -->
+      <div class="card">
+        <div class="point">{{FINDING_PATTERN}}</div>
+        <p class="detail">{{FINDING_PARAGRAPH_WITH_REAL_EXAMPLE}}</p>
+        <!-- REPEAT per receipt -->
+        <div class="receipt">
+          <span class="who">@{{HANDLE}}</span>
+          <span class="stat">{{X.X}}x baseline · {{REACH}}</span>
+          <span class="note">{{RECEIPT_NOTE}}</span>
+        </div>
+        <!-- /REPEAT -->
+      </div>
+      <!-- /REPEAT -->
+      <p class="kv"><b>Your own numbers:</b> {{OWN_ACCOUNT_LINE_OR_REMOVE_THIS_LINE}}</p>
+
+      <h2>6 · Your first five posts</h2>
+      <!-- REPEAT per hook (5) -->
+      <div class="card hook">
+        <div class="point">{{HOOK_THE_LITERAL_OPENING_LINE}}</div>
+        <p class="kv">
+          <b>Steal the structure from:</b> @{{HANDLE}} ({{STRUCTURE_IN_PLAIN_WORDS}})
+        </p>
+        <p class="kv"><b>Feeds:</b> {{TOPIC_TREE_BRANCH}}</p>
+      </div>
+      <!-- /REPEAT -->
+
+      <h2>7 · How this could make money</h2>
+      <!-- Three blocks: Now / Later / Eventually. Now carries the detail. -->
+      <div class="card">
+        <div class="point">{{NOW_LATER_OR_EVENTUALLY_TITLE}}</div>
+        <p class="detail">{{MONEY_PARAGRAPH}}</p>
+      </div>
+
+      <div class="coda">{{CLOSING_CODA_TWO_OR_THREE_LINES}}</div>
+
+      <div class="foot">
+        Built from your interview plus {{N_SEARCHES}} market searches and {{N_CREATORS}} creators
+        studied · strategy and swipe file saved to your Eden “Personal brand strategy” board
+      </div>
+    </div>
+  </body>
+</html>
