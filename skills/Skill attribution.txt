@@ -6,3 +6,6 @@ https://github.com/virgiliojr94/book-to-skill
 
 scientific-research:
 https://github.com/K-Dense-AI/scientific-agent-skills
+
+personal-brand-strategist:
+https://eden.so/kits/one-human-business/
