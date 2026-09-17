@@ -350,7 +350,23 @@ class ModelsPanel(UiThread, QWidget):
         if e.repo:
             lines.append(f"repo           {e.repo}")
         kv = gguf_kv_bytes(e.info, ctx) / 1024 ** 3
-        from ..gguf import architecture_warning
+        from ..gguf import architecture_warning, offload_advice
+        try:
+            from ..sysmon import Monitor
+            cards = Monitor().gpus()
+        except Exception:
+            cards = []
+        card = max(cards, key=lambda g: g.mem_total_mb, default=None)
+        if card is not None and card.mem_total_mb:
+            # Dedicated memory only. Shared memory is the part that spills, and
+            # counting it is how a model comes to be "fitted" into RAM the card
+            # reaches over PCIe.
+            advice = offload_advice(e.info, int(card.mem_total_mb), ctx,
+                                    integrated=card.integrated)
+            if advice:
+                lines.append("")
+                lines.append(advice)
+                lines.append("")
         new_arch = architecture_warning(e.info)
         if new_arch:
             lines.append("")

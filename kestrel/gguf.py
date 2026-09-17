@@ -585,3 +585,61 @@ def draft_mismatch(main: "GGUFInfo", draft: "GGUFInfo") -> str:
         return ("the draft model is not much smaller than the main one, so "
                 "guessing will cost about what it saves")
     return ""
+
+
+def offload_advice(info: "GGUFInfo", vram_mb: int, n_ctx: int,
+                   integrated: bool = False, cache_bits: int = 16) -> str:
+    """What splitting this model across GPU and CPU will actually cost.
+
+    The arithmetic that matters is different for the two kinds of graphics,
+    and the discrete case surprises people:
+
+    On a **discrete** card, every layer boundary that crosses between GPU and
+    CPU moves the whole activation over PCIe, twice per token. At perhaps 8
+    GB/s against 450 GB/s of on-card bandwidth, a split that leaves most layers
+    on the CPU can be slower than using no GPU at all — the card spends its
+    time waiting on the bus. Worse, Windows lets a driver oversubscribe VRAM
+    and spill the excess into system memory silently; nothing fails, and every
+    read of a spilled weight then crosses PCIe as well. That is the case where
+    answers take minutes and the GPU sits near idle.
+
+    On **integrated** graphics there is no bus to cross — the same RAM serves
+    both — so a partial split costs only the compute units it did not use, and
+    the middle ground is fine.
+    """
+    if not info.n_layer or not info.file_size:
+        return ""
+    fits = layers_that_fit(info, vram_mb, n_ctx, cache_bits,
+                           integrated=integrated)
+    share = fits / info.n_layer if info.n_layer else 0.0
+    weights_gb = info.file_size / 1024 ** 3
+
+    if integrated:
+        if fits >= info.n_layer:
+            return ""
+        return (f"{fits} of {info.n_layer} layers fit the graphics budget. The "
+                "rest run on the CPU, which on integrated graphics costs the "
+                "compute units and not the memory bandwidth — the same RAM "
+                "serves both.")
+
+    if fits >= info.n_layer:
+        return ""
+    if fits == 0:
+        return (f"None of this model fits {vram_mb / 1024:.1f} GB of VRAM "
+                f"({weights_gb:.1f} GB of weights). It will run on the CPU, "
+                "which is the right answer here — a card that holds nothing "
+                "adds only the bus.")
+    if share < 0.5:
+        return (f"Only {fits} of {info.n_layer} layers fit "
+                f"{vram_mb / 1024:.1f} GB of VRAM. On a discrete card that is "
+                "usually slower than running entirely on the CPU: each "
+                "boundary between GPU and CPU layers moves the activation "
+                "across PCIe, twice per token, and most of the work is on the "
+                "CPU anyway. Try GPU layers 0 and compare — and do not raise "
+                "the count past what fits, because Windows spills the excess "
+                "into system RAM without saying so, and then every read of "
+                "those weights crosses the bus too.")
+    return (f"{fits} of {info.n_layer} layers fit. The rest run on the CPU and "
+            "each token crosses PCIe at the boundary. Worth timing against "
+            "GPU layers 0 — on a discrete card the split is not always the "
+            "faster of the two.")
