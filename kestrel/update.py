@@ -266,19 +266,68 @@ def _replace_from_archive(say) -> tuple[bool, str]:
 
 
 def restart() -> bool:
-    """Relaunch Kestrel and leave. Returns False if it could not be done."""
+    """Relaunch Kestrel and leave. Returns False if it could not be done.
+
+    Started as its own process, not as a child of this one. A restart through
+    run.bat leaves a console window on screen with the new Kestrel hanging off
+    it, so closing that window — which looks like leftover rubbish from the
+    update — takes Kestrel with it.
+    """
     import subprocess
     import sys
 
     root = project_root()
-    launcher = root / ("run.bat" if os.name == "nt" else "run.sh")
     try:
-        if launcher.exists():
-            command = ([str(launcher)] if os.name == "nt"
-                       else ["bash", str(launcher)])
-        else:
-            command = [sys.executable, "-m", "kestrel"]
-        subprocess.Popen(command, cwd=str(root), close_fds=True)
+        command = _relaunch_command(root)
+        if not command:
+            return False
+        flags = 0
+        if os.name == "nt":
+            # DETACHED_PROCESS so it is not tied to this console, and its own
+            # process group so a Ctrl-C here does not reach it.
+            flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                     | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        subprocess.Popen(command, cwd=str(root), close_fds=True,
+                         creationflags=flags,
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         start_new_session=(os.name != "nt"))
         return True
     except Exception:
         return False
+
+
+def _relaunch_command(root) -> list:
+    """How to start Kestrel again, preferring the ways without a console.
+
+    run.bat is the last resort rather than the first: it opens a console
+    window, and on Windows the window owns what it started.
+    """
+    import sys
+
+    if os.name == "nt":
+        for candidate in (root / "Kestrel.exe",
+                          root / "dist" / "Kestrel" / "Kestrel.exe",
+                          root / "launcher" / "Kestrel" / "Kestrel.exe"):
+            if candidate.exists():
+                return [str(candidate)]
+        pythonw = root / ".venv" / "Scripts" / "pythonw.exe"
+        if pythonw.exists():
+            return [str(pythonw), "-m", "kestrel"]
+        # The interpreter running this may itself be pythonw; if it is python
+        # the console is unavoidable, but it is still better than run.bat,
+        # which adds a second window on top.
+        beside = Path(sys.executable).with_name("pythonw.exe")
+        if beside.exists():
+            return [str(beside), "-m", "kestrel"]
+        return [sys.executable, "-m", "kestrel"]
+
+    built = root / "dist" / "Kestrel" / "Kestrel"
+    if built.exists():
+        return [str(built)]
+    python = root / ".venv" / "bin" / "python"
+    if python.exists():
+        return [str(python), "-m", "kestrel"]
+    return [sys.executable, "-m", "kestrel"]
