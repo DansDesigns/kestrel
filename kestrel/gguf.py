@@ -367,9 +367,32 @@ VISION_KEYS = ("clip.has_vision_encoder", "clip.vision.embedding_length",
                "vision.block_count", "mm.projector_type",
                "gemma3.vision.block_count", "qwen2vl.vision.block_count")
 VISION_ARCHES = ("gemma3", "gemma4", "qwen2vl", "qwen2_5_vl", "qwen3vl",
+                 "qwen4_exp", "qwen4exp",
                  "llava", "minicpmv", "internvl", "pixtral", "mllama",
                  "idefics", "smolvlm", "moondream", "paligemma")
+
+# Architectures newer than most installed llama.cpp builds. A model whose
+# architecture the binary does not know fails at load with a message about an
+# unknown key, which reads like a corrupt file rather than an old build — so
+# it is worth naming before the attempt.
+NEW_ARCHES = {
+    "qwen4_exp": ("Qwen3.8-Flash-Next and Qwen3-Coder-Next use the qwen4_exp "
+                  "architecture — gated delta layers, sparse attention and "
+                  "engram (n-gram) embeddings. It needs a llama.cpp from "
+                  "December 2025 or later; older builds refuse the file."),
+    "qwen4exp": ("Qwen3.8-Flash-Next uses the qwen4_exp architecture, which "
+                 "needs a recent llama.cpp build."),
+}
 PROJECTOR_HINTS = ("mmproj", "projector", "vision", "-vit", "clip")
+
+
+def architecture_warning(info: "GGUFInfo") -> str:
+    """Whether this model's architecture is likely to be too new, and why."""
+    arch = (info.architecture or "").lower().replace("-", "_")
+    for known, note in NEW_ARCHES.items():
+        if arch.startswith(known):
+            return note
+    return ""
 
 
 def find_projector(path: Path) -> str:

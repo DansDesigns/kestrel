@@ -59,6 +59,12 @@ class Runtime:
     draft_max: int = 16           # tokens to guess ahead
     draft_min: int = 0            # stop drafting below this run length
     draft_gpu_layers: int = -1    # -1 all, 0 none
+    # llama.cpp's own fitting. Newer builds work out how much of a model can
+    # sit on the GPU and leave a margin, which is the same arithmetic Kestrel
+    # does from the outside — but from the inside, where the real allocations
+    # are. Off by default: older builds reject the flag and refuse to start.
+    fit: str = "off"              # off | on
+    fit_target_mb: int = 1024     # GPU memory to leave free
     # What the recovery ladder changed to make a model fit. Kept because the
     # model needs it, recorded because these settings cost quality or speed and
     # nobody would guess they were still on a week later.
@@ -87,6 +93,8 @@ class Runtime:
         # Resolved by build_command, which knows the model and the device.
         if self.n_gpu_layers >= 0:
             a += ["-ngl", str(self.n_gpu_layers)]
+        if self.fit == "on":
+            a += ["--fit", "on", "--fit-target", str(self.fit_target_mb)]
         if self.draft_model:
             a += ["-md", self.draft_model,
                   "--draft-max", str(self.draft_max),
@@ -146,6 +154,8 @@ class Runtime:
             a += ["--rope-freq-scale", str(self.rope_freq_scale)]
         if self.yarn_orig_ctx:
             a += ["--yarn-orig-ctx", str(self.yarn_orig_ctx)]
+        if self.fit == "on":
+            a += ["--fit", "on", "--fit-target", str(self.fit_target_mb)]
         if self.draft_model:
             a += ["-md", self.draft_model,
                   "--draft-max", str(self.draft_max),

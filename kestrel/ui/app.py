@@ -2704,6 +2704,9 @@ class MainWindow(QWidget):
                     from .. import gguf as ggufmod
                     info = ggufmod.read(path, want_template=False)
                     self.cfg.model_vision = bool(info.vision and info.projector)
+                    new_arch = ggufmod.architecture_warning(info)
+                    if new_arch:
+                        self.statusReady.emit(new_arch)
                     trouble = info.template_trouble
                     if trouble and not self.cfg.runtime.chat_template:
                         self.statusReady.emit(

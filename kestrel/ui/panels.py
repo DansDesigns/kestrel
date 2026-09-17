@@ -350,6 +350,12 @@ class ModelsPanel(UiThread, QWidget):
         if e.repo:
             lines.append(f"repo           {e.repo}")
         kv = gguf_kv_bytes(e.info, ctx) / 1024 ** 3
+        from ..gguf import architecture_warning
+        new_arch = architecture_warning(e.info)
+        if new_arch:
+            lines.append("")
+            lines.append(new_arch)
+            lines.append("")
         trouble = e.info.template_trouble
         lines.append(f"chat template   {trouble or 'present'}")
         if e.info.vocab:
@@ -482,6 +488,24 @@ class ParamsPanel(QWidget):
         self.budget_note.setObjectName("Dim")
         self.budget_note.setWordWrap(True)
         form.addRow("", self.budget_note)
+
+        self.rt_fit = QComboBox()
+        self.rt_fit.addItems(["off", "on"])
+        self.rt_fit.setCurrentText(rt.fit)
+        self.rt_fit.setToolTip(
+            "Let llama.cpp decide how much of the model goes on the GPU. It "
+            "measures the real allocations rather than estimating from "
+            "outside, but older builds do not know the flag and will refuse "
+            "to start.")
+        form.addRow("Automatic fit", self.rt_fit)
+
+        self.rt_fit_target = QSpinBox()
+        self.rt_fit_target.setRange(0, 16384)
+        self.rt_fit_target.setSingleStep(256)
+        self.rt_fit_target.setValue(rt.fit_target_mb)
+        self.rt_fit_target.setSuffix(" MB")
+        self.rt_fit_target.setToolTip("GPU memory to leave free when fitting.")
+        form.addRow("Leave free", self.rt_fit_target)
 
         self.rt_draft = QLineEdit(rt.draft_model)
         self.rt_draft.setPlaceholderText("none — a small model of the same family")
@@ -707,6 +731,8 @@ class ParamsPanel(QWidget):
         rt.tensor_split = self.rt_ts.text().strip()
         rt.gpu_budget_mb = self.rt_budget.value()
         rt.chat_template = self.rt_template.currentText().strip()
+        rt.fit = self.rt_fit.currentText()
+        rt.fit_target_mb = self.rt_fit_target.value()
         rt.draft_model = self.rt_draft.text().strip()
         rt.draft_max = self.rt_draft_max.value()
         rt.no_kv_offload = self.rt_nkvo.isChecked()
