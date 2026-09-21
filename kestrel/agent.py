@@ -306,6 +306,28 @@ def strip_identity(text: str) -> str:
     return IDENTITY_RE.sub("", str(text or "")).strip()
 
 
+_INTENT = re.compile(
+    r"\b(i('| wi)ll|let me|i am going to|i'm going to|next,? i|now i|"
+    # Anything to the end of the sentence, dots included: "main.py" and
+    # "config.json" are what these sentences are usually about.
+    r"i('| wi)ll now|going to now|i shall)\b[^\n]{0,90}$",
+    re.IGNORECASE)
+
+
+def _announces_intent(text: str) -> bool:
+    """Does this reply end by saying what it will do, rather than doing it?
+
+    Only the closing sentence counts. "I'll explain why below" in the middle
+    of an answer is not a stall; "I'll now write main.py." as the last words,
+    with no tool call, is.
+    """
+    said = (text or "").strip()
+    if not said or "?" in said[-120:]:
+        return False
+    last = re.split(r"(?<=[.!])\s+", said)[-1]
+    return bool(_INTENT.search(last.rstrip(".! ")))
+
+
 def collapse_repeats(text: str) -> str:
     """Fold immediately repeated lines or sentences into one.
 
@@ -433,7 +455,7 @@ class Agent:
         # Minimal means minimal: the team tools go with the team text, or the
         # diagnostic still carries most of what it is meant to rule out.
         self.roster = (Roster(self.cfg.workspace_path())
-                       if self.cfg.team_enabled and not self._minimal() else None)
+                       if False else None)   # one agent: the team is retired
         self.persona = self._load_persona()
         self.skills = skillmod.discover(self.cfg.skills_dirs)
         # Written on discovery so it is current: an index that lags behind the
@@ -841,7 +863,7 @@ class Agent:
         self.thoughts = ThoughtLog.load(workspace)
         self.handover = handovermod.load(workspace)
         self.roster = (Roster(workspace)
-                       if self.cfg.team_enabled and not self._minimal() else None)
+                       if False else None)   # one agent: the team is retired
         if self.memory is not None:
             self.memory.scope = self.cfg.memory_scope()
         # The registry closes over the workspace for its file sandbox, so it is
@@ -1125,7 +1147,18 @@ class Agent:
         The checklist is the definition of done. If the model has written one
         and steps remain open, a prose reply is a status update rather than an
         answer, and the work carries on.
+
+        Without a checklist there is still one reliable sign: a reply that
+        ends by announcing what it is about to do — "I'll now write the file",
+        "Let me check that" — and then does not. That is a model describing an
+        action instead of taking it, and it is the stall that otherwise needs
+        Continue pressing by hand.
         """
+        announced = _announces_intent(strip_calls(content))
+        if announced and self._prose_streak < 2:
+            return ("You said you would do that next. Do it now, with the "
+                    "tool, rather than describing it. Call finish when the "
+                    "task is actually complete.")
         if not self.cfg.plan_driven or self.todo is None or not self.todo.items:
             return ""
         if self.todo.complete:

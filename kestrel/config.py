@@ -140,7 +140,7 @@ class Config:
     favourite_models: list[str] = field(default_factory=list)
     canvas_enabled: bool = True       # give the model the shared code canvas
     canvas_forced: bool = True        # refuse write_file for new code files
-    team_enabled: bool = True         # several agents sharing one model
+    team_enabled: bool = False        # retired: Kestrel is one agent
     minimal_prompt: bool = False      # strip everything optional, for diagnosis
     plan_pointer_only: bool = True    # send a summary, not the whole checklist
     system_prompt_override: str = ""  # replaces the assembled prompt entirely

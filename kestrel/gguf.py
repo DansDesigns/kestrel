@@ -386,8 +386,34 @@ NEW_ARCHES = {
 PROJECTOR_HINTS = ("mmproj", "projector", "vision", "-vit", "clip")
 
 
+# Weight formats that stock llama.cpp cannot decode. A file in one of these
+# loads without complaint on some builds and produces gibberish — which reads
+# as a broken model, when it is the wrong binary.
+FORK_FORMATS = {
+    "PQ2_0": "Prism ML's ternary format",
+    "PTQ1_0": "Prism ML's packed ternary format",
+}
+
+
+def format_warning(info: "GGUFInfo") -> str:
+    """Whether this file needs a particular llama.cpp fork to run correctly."""
+    name = Path(str(info.path)).name.upper()
+    quant = (info.quant or "").upper()
+    for fmt, what in FORK_FORMATS.items():
+        if fmt in name or fmt in quant:
+            return (f"This is {what} ({fmt}), used by Ternary Bonsai. Stock "
+                    "llama.cpp cannot decode it correctly — it needs Prism "
+                    "ML's fork (github.com/PrismML-Eng/llama.cpp, the prism "
+                    "branch). On a stock build it may load and then produce "
+                    "nonsense, which looks like a broken download.")
+    return ""
+
+
 def architecture_warning(info: "GGUFInfo") -> str:
     """Whether this model's architecture is likely to be too new, and why."""
+    fork = format_warning(info)
+    if fork:
+        return fork
     arch = (info.architecture or "").lower().replace("-", "_")
     for known, note in NEW_ARCHES.items():
         if arch.startswith(known):

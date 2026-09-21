@@ -735,8 +735,9 @@ class MainWindow(QWidget):
         self.cfg = cfg
         self.busy = False
         self.speech = speechmod.Speech(cfg)
-        self.speaker = self.speech.speaker()
-        self.speaker.on_error = lambda msg: self.statusReady.emit(f"Speech: {msg}")
+        self.speaker = _SafeSpeaker(self.speech.speaker(),
+                                    lambda msg: self.statusReady.emit(
+                                        f"Speech: {msg}"))
         self.dictation = None
         self._partial_len = 0
         self._ngl_retries = 0
@@ -850,7 +851,11 @@ class MainWindow(QWidget):
         # stay legible at any width.
         # Persona is no longer a tab of its own: a character belongs to whoever
         # is wearing it, so it is chosen per agent instead.
-        self._icon_tabs = ["status", "models", "params", "agents", "cluster",
+        # Kestrel is one agent. The team of roles on one model cost a prompt
+        # rebuild per handoff and added a layer of instruction that small
+        # models followed badly; one agent with the whole context does the
+        # same work more reliably.
+        self._icon_tabs = ["status", "models", "params", "cluster",
                            "tools", "skills", "memory", "speech", "backend"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
@@ -869,8 +874,7 @@ class MainWindow(QWidget):
                     "Models")
         left.addTab(self._lazy(lambda: ParamsPanel(self.cfg), self._wire_params),
                     "Params")
-        left.addTab(self._lazy(lambda: AgentsPanel(self.cfg), self._wire_agents),
-                    "Agents")
+
 
         self.progress("checking the cluster")
         self.cluster = ClusterPanel(self.cfg)
@@ -3408,8 +3412,9 @@ class MainWindow(QWidget):
 
     def _silence(self) -> None:
         self.speaker.stop()
-        self.speaker = self.speech.speaker()
-        self.speaker.on_error = lambda msg: self.statusReady.emit(f"Speech: {msg}")
+        self.speaker = _SafeSpeaker(self.speech.speaker(),
+                                    lambda msg: self.statusReady.emit(
+                                        f"Speech: {msg}"))
 
     def new_session(self) -> None:
         where = self._where_to_open("New conversation")
@@ -3573,6 +3578,60 @@ class MainWindow(QWidget):
         except Exception:
             pass
         super().closeEvent(event)
+
+
+class _SafeSpeaker:
+    """Speech that cannot take Kestrel down with it.
+
+    Audio is the least essential thing Kestrel does and the likeliest to fail:
+    a missing device, a driver that refuses a sample rate, a voice file that
+    will not load. Any of those raising inside a Qt slot ends the whole
+    program. Every call goes through here instead, and after a failure speech
+    switches itself off for the session rather than failing again on every
+    reply.
+    """
+
+    def __init__(self, inner, report):
+        self._inner = inner
+        self._report = report
+        self._broken = False
+        try:
+            inner.on_error = self._failed
+        except Exception:
+            pass
+
+    def _failed(self, message) -> None:
+        if not self._broken:
+            self._broken = True
+            self._report(f"{message} — turned off for this session")
+
+    def _call(self, name, *args):
+        if self._broken:
+            return None
+        try:
+            return getattr(self._inner, name)(*args)
+        except Exception as e:
+            self._failed(f"{type(e).__name__}: {e}")
+            return None
+
+    def push(self, text):
+        return self._call("push", text)
+
+    def flush(self):
+        return self._call("flush")
+
+    def reset(self):
+        return self._call("reset")
+
+    def stop(self):
+        return self._call("stop")
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        return lambda *a, **k: self._call(name, *a, **k) if not k else \
+            attr(*a, **k)
 
 
 def claim_identity() -> None:

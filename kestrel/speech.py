@@ -289,14 +289,18 @@ class _SoundDeviceSink:
         self.thread.start()
 
     def _pump(self) -> None:
-        while not self.stop_flag.is_set():
-            data = self.source.read(4096)
-            if not data:
-                break
-            try:
+        # Everything inside the guard, the read included. An exception on this
+        # thread ends the thread; one that reached Qt would end Kestrel.
+        try:
+            while not self.stop_flag.is_set():
+                data = self.source.read(4096)
+                if not data:
+                    break
                 self.stream.write(data)
-            except Exception:
-                break
+        except Exception:
+            pass
+        finally:
+            self.stop_flag.set()
 
     @property
     def alive(self) -> bool:

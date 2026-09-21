@@ -305,6 +305,11 @@ class LlamaClient:
             "top_p": top_p,
             "max_tokens": int(max_tokens),
             "stream": bool(stream),
+            # Keep the processed prompt in the server's cache and reuse the
+            # part that has not changed. Without this every turn re-reads the
+            # whole conversation from the start — at 30 tokens a second, a
+            # 3,000-token history is a minute and a half before the first word.
+            "cache_prompt": True,
         }
         if stop:
             payload["stop"] = list(stop)

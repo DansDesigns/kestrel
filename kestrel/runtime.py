@@ -63,6 +63,11 @@ class Runtime:
     # sit on the GPU and leave a margin, which is the same arithmetic Kestrel
     # does from the outside — but from the inside, where the real allocations
     # are. Off by default: older builds reject the flag and refuse to start.
+    # Where the server may save a conversation's processed prompt. Not live
+    # paging — reading the cache from disk on every token would be hundreds of
+    # times slower than memory — but a finished conversation can be written
+    # out and read back instead of being processed again from scratch.
+    slot_save_path: str = ""
     fit: str = "off"              # off | on
     fit_target_mb: int = 1024     # GPU memory to leave free
     # What the recovery ladder changed to make a model fit. Kept because the
@@ -93,6 +98,8 @@ class Runtime:
         # Resolved by build_command, which knows the model and the device.
         if self.n_gpu_layers >= 0:
             a += ["-ngl", str(self.n_gpu_layers)]
+        if self.slot_save_path:
+            a += ["--slot-save-path", self.slot_save_path]
         if self.fit == "on":
             a += ["--fit", "on", "--fit-target", str(self.fit_target_mb)]
         if self.draft_model:
@@ -154,6 +161,8 @@ class Runtime:
             a += ["--rope-freq-scale", str(self.rope_freq_scale)]
         if self.yarn_orig_ctx:
             a += ["--yarn-orig-ctx", str(self.yarn_orig_ctx)]
+        if self.slot_save_path:
+            a += ["--slot-save-path", self.slot_save_path]
         if self.fit == "on":
             a += ["--fit", "on", "--fit-target", str(self.fit_target_mb)]
         if self.draft_model:
