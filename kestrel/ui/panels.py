@@ -2229,6 +2229,12 @@ class SystemPanel(QWidget):
 
         self.cpu = _Meter("CPU")
         self.mem = _Meter("Memory")
+        # Which processor, not just how busy it is: "which machine is this"
+        # is the first question when comparing two of them.
+        self.cpu_name = QLabel(sysmon.cpu_identity())
+        self.cpu_name.setObjectName("Readout")
+        self.cpu_name.setWordWrap(True)
+        lay.addWidget(self.cpu_name)
         lay.addWidget(self.cpu)
         lay.addWidget(self.mem)
 

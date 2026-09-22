@@ -1177,9 +1177,8 @@ class MainWindow(QWidget):
         self._paint_history_icon()
         lay.addWidget(self.history_btn)
 
-        mark = QLabel("KESTREL")
-        mark.setObjectName("Wordmark")
-        lay.addWidget(mark)
+        # No wordmark: the window title already says Kestrel, and the space is
+        # worth more to the controls that sit here now.
 
         # Which model is loaded, permanently. It is the single most consulted
         # fact in the window and it used to be visible only while a status
@@ -2138,21 +2137,21 @@ class MainWindow(QWidget):
 
         # The three switches people reach for most, where the state they
         # affect is already on screen.
-        self.think_box = QCheckBox("Think")
+        self.think_box = _toggle("Think")
         self.think_box.setChecked(self.cfg.thinking.enabled)
         self.think_box.setToolTip("Let the model reason before answering. It "
                                   "costs tokens and time; on a small window it "
                                   "can cost more than it returns.")
         self.think_box.toggled.connect(self._set_thinking)
 
-        self.canvas_box = QCheckBox("Canvas")
+        self.canvas_box = _toggle("Canvas")
         self.canvas_box.setChecked(self.cfg.canvas_forced)
         self.canvas_box.setToolTip("Force the canvas: new code files must be "
                                    "drafted there and saved from there, rather "
                                    "than written straight to disk.")
         self.canvas_box.toggled.connect(self._set_canvas_forced)
 
-        self.plan_box = QCheckBox("Plan")
+        self.plan_box = _toggle("Plan")
         self.plan_box.setChecked(self.cfg.todo_enabled)
         self.plan_box.setToolTip("Break work into a checklist and follow it. "
                                  "Off for a conversation, where planning a "
@@ -2160,7 +2159,7 @@ class MainWindow(QWidget):
                                  "for it.")
         self.plan_box.toggled.connect(self._set_plan_enabled)
 
-        self.tts_box = QCheckBox("TTS")
+        self.tts_box = _toggle("TTS")
         self.tts_box.setChecked(self.cfg.speech.auto_speak)
         # "Speak" sat next to a Speak button that does something else — one
         # reads every reply, the other reads the one you pressed it on.
@@ -3754,6 +3753,20 @@ class MainWindow(QWidget):
         except Exception:
             pass
         super().closeEvent(event)
+
+
+def _toggle(label: str) -> QPushButton:
+    """A switch that is a button all over, not a checkbox with its tick hidden.
+
+    A hidden-indicator checkbox only answers clicks on its text, so a click on
+    the padding around the word did nothing — which read as the switch
+    sometimes not working.
+    """
+    button = QPushButton(label)
+    button.setCheckable(True)
+    button.setObjectName("TopToggle")
+    button.setCursor(Qt.PointingHandCursor)
+    return button
 
 
 class _SafeSpeaker:

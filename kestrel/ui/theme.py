@@ -270,13 +270,17 @@ QWidget#Segment QPushButton {{
     background: transparent;
 }}
 QWidget#Segment QPushButton#PresetOn {{ background: {amber}; color: {on_accent}; }}
-QCheckBox#TopToggle {{
-    border: 1px solid {line}; border-radius: 13px; padding: 4px 11px;
-    color: {dim};
+QPushButton#TopToggle {{
+    /* The same shape as the other bar buttons, so the row reads as one set. */
+    background: {panel_hi}; color: {text}; border: 1px solid {line};
+    border-radius: 13px; padding: 4px 13px;
 }}
-QCheckBox#TopToggle::indicator {{ width: 0; height: 0; border: none; }}
-QCheckBox#TopToggle:checked {{
-    border-color: {signal}; color: {signal}; background: {panel_hi};
+QPushButton#TopToggle:hover {{ border-color: {signal}; }}
+QPushButton#TopToggle:checked {{
+    /* Filled, not outlined: on should be unmistakable at a glance. */
+    background: {signal}; color: {on_accent}; border-color: {signal};
+    /* Same weight as off: bold widens the word, and the row would shuffle
+       sideways every time a switch changed. */
 }}
 
 /* Workspace panels: framed like the design, a banner above the body. */

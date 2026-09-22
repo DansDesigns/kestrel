@@ -1947,16 +1947,27 @@ class ChatTabs(QWidget):
 
         self.add_btn = QPushButton("+")
         self.add_btn.setObjectName("Chip")
-        self.add_btn.setFixedWidth(30)
+        self.add_btn.setFixedSize(28, 22)
         self.add_btn.setToolTip("New conversation on the same model")
         self.add_btn.clicked.connect(lambda: self.added.emit())
         self.bar.setParent(self.bar.parent())
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        lay.insertLayout(0, row)
+        # A thin row: it holds tabs and one small button, and every pixel it
+        # takes comes out of the conversation.
+        self.row_host = QWidget()
+        self.row_host.setFixedHeight(32)
+        row = QHBoxLayout(self.row_host)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(4)
         lay.removeWidget(self.bar)
-        row.addWidget(self.bar, 1)
-        row.addWidget(self.add_btn)
+        # Stretch either side of the button while it stands alone, so it sits
+        # in the middle rather than hanging off one edge; with tabs beside it,
+        # the left stretch goes and it follows the last tab.
+        self._lead = row.addStretch(1) or row.itemAt(row.count() - 1)
+        row.addWidget(self.bar, 0)
+        row.addWidget(self.add_btn, 0, Qt.AlignVCenter)
+        row.addStretch(1)
+        self._row = row
+        lay.insertWidget(0, self.row_host)
 
     # -- membership ----------------------------------------------------------
     def add(self, view, title: str = "New chat") -> int:
@@ -2031,7 +2042,14 @@ class ChatTabs(QWidget):
         hiding the + with it left no way to reach a second conversation at all,
         which is worse than the chrome.
         """
-        self.bar.setVisible(self.stack.count() > 1)
+        several = self.stack.count() > 1
+        self.bar.setVisible(several)
+        # Centred alone, following the tabs otherwise.
+        if hasattr(self, "_row"):
+            # The trailing stretch always absorbs the slack; the leading one
+            # only while the button stands alone, which is what centres it.
+            self._row.setStretch(0, 0 if several else 1)
+            self._row.setStretch(self._row.count() - 1, 1)
 
 
 def cross_icon(colour: str, size: int = 12) -> QIcon:

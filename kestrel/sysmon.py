@@ -554,3 +554,55 @@ def describe() -> str:
     bits.append({"windows": "Windows GPU counters", "sysfs": "Linux sysfs",
                  "apple": "Apple", "": "no GPU interface"}.get(tool, tool))
     return " · ".join(bits)
+
+
+def cpu_identity() -> str:
+    """The processor's name and shape, in one line.
+
+    platform.processor() is nearly useless on Windows — "Intel64 Family 6 Model
+    140 Stepping 1" — so the registry is asked for the marketing name, which is
+    what a person recognises. Linux reads it from /proc/cpuinfo.
+    """
+    import os
+    import platform
+
+    name = ""
+    if os.name == "nt":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            name = str(winreg.QueryValueEx(key, "ProcessorNameString")[0])
+        except OSError:
+            pass
+    else:
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as info:
+                for line in info:
+                    if line.lower().startswith(("model name", "hardware",
+                                                "processor\t:")):
+                        value = line.split(":", 1)[1].strip()
+                        if value and not value.isdigit():
+                            name = value
+                            break
+        except OSError:
+            pass
+    name = " ".join((name or platform.processor() or "Unknown CPU").split())
+
+    physical = logical = 0
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False) or 0
+        logical = psutil.cpu_count(logical=True) or 0
+    except Exception:
+        logical = os.cpu_count() or 0
+    shape = []
+    if physical:
+        shape.append(f"{physical} cores")
+    if logical and logical != physical:
+        shape.append(f"{logical} threads")
+    arch = platform.machine() or ""
+    if arch:
+        shape.append(arch.lower().replace("amd64", "x86-64").replace("x86_64", "x86-64"))
+    return name + (f" · {', '.join(shape)}" if shape else "")
