@@ -1140,6 +1140,17 @@ def _draw_glyph(kind: str, size: int = 20, colour: str = "") -> QIcon:
         p.drawLine(int(a), int(a + 3), int(mid - 1), int(a + 3))
         p.drawLine(int(mid - 1), int(a + 3), int(mid + 1), int(a + 6))
         p.drawRect(QRectF(a, a + 6, b - a, b - a - 8))
+    elif kind == "chats":                      # two speech bubbles, a thread
+        heavier = p.pen()
+        heavier.setWidthF(heavier.widthF() * 1.35)
+        p.setPen(heavier)
+        p.drawRoundedRect(QRectF(a, a + 1, (b - a) * 0.66, (b - a) * 0.46), 3, 3)
+        p.drawLine(int(a + 3), int(a + 1 + (b - a) * 0.46),
+                   int(a + 3), int(a + 4 + (b - a) * 0.46))
+        p.drawRoundedRect(QRectF(a + (b - a) * 0.34, mid, (b - a) * 0.66,
+                                 (b - a) * 0.44), 3, 3)
+        p.drawLine(int(b - 3), int(mid + (b - a) * 0.44),
+                   int(b - 3), int(mid + 3 + (b - a) * 0.44))
     elif kind == "agents":                     # three figures, a team
         for cx, r in ((mid - 5, 3.0), (mid + 5, 3.0), (mid, 3.6)):
             top = a + (2 if cx == mid else 4)

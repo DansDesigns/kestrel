@@ -217,6 +217,7 @@ def stylesheet() -> str:
     alert = p["ALERT"]
     alert_hi = mix(alert, "#FFFFFF", 0.18)
     accent_hi = hover
+    signal = p.get("SIGNAL", amber)
     return f"""
 QWidget {{
     background: {ink};
@@ -260,11 +261,36 @@ QLabel#PanelTitle {{
     padding: 7px 12px 5px 12px;
     border-bottom: 1px solid {line};
 }}
+/* Top bar: presets as one segmented control, switches as pills. */
+QWidget#Segment {{
+    background: {panel}; border: 1px solid {line}; border-radius: 8px;
+}}
+QWidget#Segment QPushButton {{
+    border: none; border-radius: 6px; padding: 4px 10px; min-height: 0;
+    background: transparent;
+}}
+QWidget#Segment QPushButton#PresetOn {{ background: {amber}; color: {on_accent}; }}
+QCheckBox#TopToggle {{
+    border: 1px solid {line}; border-radius: 13px; padding: 4px 11px;
+    color: {dim};
+}}
+QCheckBox#TopToggle::indicator {{ width: 0; height: 0; border: none; }}
+QCheckBox#TopToggle:checked {{
+    border-color: {signal}; color: {signal}; background: {panel_hi};
+}}
+
 /* Workspace panels: framed like the design, a banner above the body. */
 QWidget#FoldPanel {{
     background: {panel}; border: 1px solid {line}; border-radius: 12px;
 }}
-QWidget#FoldBanner {{ border-bottom: 1px solid {line}; background: transparent; }}
+QWidget#FoldBanner {{ border-bottom: 1px solid {line}; background: {panel};
+    border-top-left-radius: 12px; border-top-right-radius: 12px; }}
+QWidget#FoldBanner QLabel, QWidget#FoldBanner QToolButton {{
+    background: transparent; border: none;
+}}
+QScrollArea#FoldScroll, QScrollArea#FoldScroll > QWidget > QWidget {{
+    background: {panel}; border: none;
+}}
 QLabel#FoldTitle {{
     color: {dim}; font-family: "IBM Plex Mono", "JetBrains Mono", Consolas, monospace;
     letter-spacing: 1px; font-weight: 600;

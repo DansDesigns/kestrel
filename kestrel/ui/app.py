@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import subprocess
+import re
 import sys
 import threading
 import time
@@ -44,7 +45,8 @@ from .splash import Splash
 from .widgets import (ActivityTree, ChatTabs, ChatView, ContextGauge,
                       BusyOverlay, Field, IconTabBar, LazyTab, Readout,
                       DownloadBar, MonitorStrip, TypingIndicator, clear_font_cache,
-                      install_wheel_guard, mono_font, stretch_columns)
+                      glyph_icon, install_wheel_guard, mono_font,
+                      stretch_columns)
 
 
 # ------------------------------------------------------------------ worker --
@@ -1099,6 +1101,7 @@ class MainWindow(QWidget):
         self.drawer_host.hide()
         self._collapsed["left"] = True
         self._collapsed["right"] = False
+        self._populate_top_controls()
         self._panel_widths = {"left": 380, "right": 250}
         # Matches what is on screen: the drawer starts closed.
         self._collapsed = {"left": True, "right": False}
@@ -1159,14 +1162,19 @@ class MainWindow(QWidget):
         lay.setSpacing(8)
 
         # History: conversations and projects, hidden and shown from here.
-        self.history_btn = QPushButton("☰")
+        self.history_btn = QPushButton()
         self.history_btn.setObjectName("Chip")
+        self.history_btn.setIconSize(QSize(20, 20))
         self.history_btn.setCheckable(True)
         self.history_btn.setChecked(True)
         self.history_btn.setFixedWidth(36)
         self.history_btn.setToolTip("Show or hide conversations and projects")
         self.history_btn.toggled.connect(
             lambda on: self._toggle_panel("right", None, on))
+        # Drawn in the colour of whatever it sits on: dark on the lit button,
+        # dim on the plain one. A single colour vanished into one or the other.
+        self.history_btn.toggled.connect(lambda _on: self._paint_history_icon())
+        self._paint_history_icon()
         lay.addWidget(self.history_btn)
 
         mark = QLabel("KESTREL")
@@ -1176,6 +1184,13 @@ class MainWindow(QWidget):
         # Which model is loaded, permanently. It is the single most consulted
         # fact in the window and it used to be visible only while a status
         # message happened to be about it.
+        # Which conversation, in which project — and the way to any other.
+        self.chat_btn = QPushButton("New chat ▾")
+        self.chat_btn.setObjectName("Chip")
+        self.chat_btn.setToolTip("Conversations and projects")
+        self.chat_btn.clicked.connect(self._chat_menu)
+        lay.addWidget(self.chat_btn)
+
         self.bar_model = QLabel("no model loaded…")
         self.bar_model.setObjectName("BarModel")
         self.bar_model.setToolTip("The model currently loaded — click to choose "
@@ -1183,9 +1198,16 @@ class MainWindow(QWidget):
         self.bar_model.setCursor(Qt.PointingHandCursor)
         # Clickable, because it is the label people look at when they want to
         # change the thing it names.
-        self.bar_model.mousePressEvent = lambda _e: self.show_models()
+        self.bar_model.mousePressEvent = lambda _e: self._model_menu()
         self.bar_model.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         lay.addWidget(self.bar_model)
+
+        # Filled once the Status tab has built them: the presets and the four
+        # switches move here rather than being copied, so there is one of each
+        # and nothing to keep in step.
+        self._top_controls = QHBoxLayout()
+        self._top_controls.setSpacing(6)
+        lay.addLayout(self._top_controls)
 
         self.bar_status = QLabel("")
         self.bar_status.setObjectName("BarStatus")
@@ -1350,6 +1372,7 @@ class MainWindow(QWidget):
         state["named"] = True
         state["session"].title = label
         self.tabs.set_title(index, label)
+        self._name_chat_button()
 
     def _stash_tab(self) -> None:
         """Put the live state back into the tab it belongs to."""
@@ -1369,6 +1392,7 @@ class MainWindow(QWidget):
 
     @Slot(int)
     def _tab_switched(self, index: int) -> None:
+        QTimer.singleShot(0, self._name_chat_button)
         """Make the agent believe it is in the conversation now showing."""
         if not (0 <= index < len(self._tab_state)):
             return
@@ -2275,6 +2299,96 @@ class MainWindow(QWidget):
             if self._bottom_folded else "")
         self.cfg.bottom_folded = self._bottom_folded
         self.cfg.save()
+
+    def _paint_history_icon(self) -> None:
+        on = self.history_btn.isChecked()
+        colour = theme.ON_ACCENT if on else theme.TEXT
+        self.history_btn.setIcon(glyph_icon("chats", 20, colour))
+
+    def _populate_top_controls(self) -> None:
+        """Move the everyday switches up into the top bar."""
+        segment = QWidget()
+        segment.setObjectName("Segment")
+        row = QHBoxLayout(segment)
+        row.setContentsMargins(2, 2, 2, 2)
+        row.setSpacing(2)
+        for name in ("precise", "balanced", "creative"):
+            button = self.preset_buttons.get(name)
+            if button is not None:
+                button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                row.addWidget(button)
+        self._top_controls.addWidget(segment)
+        for box in (self.think_box, self.plan_box, self.canvas_box, self.tts_box):
+            box.setObjectName("TopToggle")
+            box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            box.style().unpolish(box)
+            box.style().polish(box)
+            self._top_controls.addWidget(box)
+
+    def _model_menu(self) -> None:
+        """Choose a model from the ones on this machine, or go and get one."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        seen: list[Path] = []
+        remembered = [self.cfg.last_good_model, *self.cfg.model_profiles.keys()]
+        for folder in self.cfg.model_dirs or []:
+            try:
+                seen.extend(sorted(Path(folder).expanduser().rglob("*.gguf"))[:60])
+            except OSError:
+                pass
+        names = {}
+        for path in seen:
+            if "mmproj" in path.name.lower() or \
+                    re.search(r"-0000[2-9]-of-", path.name):
+                continue             # projectors and later shards are not models
+            names.setdefault(path.name, path)
+        favourites = [n for n in remembered if n and Path(n).name in names]
+        for name in sorted(names, key=lambda n: (
+                Path(n).name not in {Path(f).name for f in favourites}, n.lower())):
+            path = names[name]
+            action = menu.addAction(name)
+            action.triggered.connect(lambda _c=False, p=str(path): self.load_model(p))
+        if names:
+            menu.addSeparator()
+        menu.addAction("All models…").triggered.connect(self.show_models)
+        menu.addAction("Download models…").triggered.connect(self.open_downloads)
+        menu.exec(self.bar_model.mapToGlobal(self.bar_model.rect().bottomLeft()))
+
+    def _chat_menu(self) -> None:
+        """Conversations in this project, and the other projects."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction("New conversation").triggered.connect(self.new_session)
+        menu.addSeparator()
+        project = None
+        try:
+            project = self.projects_panel.current_project()
+            for session in sessionmod.list_sessions(project, limit=20):
+                label = session.title or sessionmod.short_title(session.messages) \
+                    or "Conversation"
+                menu.addAction(label).triggered.connect(
+                    lambda _c=False, s=session: self.open_session(s))
+        except Exception:
+            pass
+        projects = menu.addMenu("Projects")
+        try:
+            for other in sessionmod.list_projects(self.cfg.workspace_root):
+                projects.addAction(other.name).triggered.connect(
+                    lambda _c=False, p=str(other.path): self.open_project(p))
+        except Exception:
+            pass
+        menu.exec(self.chat_btn.mapToGlobal(self.chat_btn.rect().bottomLeft()))
+
+    def _name_chat_button(self) -> None:
+        project = None
+        try:
+            project = self.projects_panel.current_project()
+        except Exception:
+            pass
+        title = getattr(self.session, "title", "") or "New chat"
+        where = project.name if project is not None else ""
+        text = f"{where} / {title}" if where else title
+        self.chat_btn.setText((text[:40] + "…" if len(text) > 40 else text) + " ▾")
 
     def show_models(self) -> None:
         """Show the model list, or put it away if it is already showing.

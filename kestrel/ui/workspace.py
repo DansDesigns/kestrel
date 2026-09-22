@@ -39,6 +39,7 @@ class FoldPanel(QWidget):
         self.summary = ""
 
         self.setObjectName("FoldPanel")
+        self.setMinimumHeight(0)
         # So the stylesheet's background and border actually paint on a
         # plain QWidget, which otherwise ignores them.
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -67,7 +68,17 @@ class FoldPanel(QWidget):
         bar.addWidget(self.detail)
         self.banner.setFixedHeight(36)
         lay.addWidget(self.banner)
-        lay.addWidget(body, 1)
+        # The body scrolls rather than squeezes. Three panels sharing a short
+        # window leave each less than its controls need, and a layout forced
+        # below its minimum overlaps its buttons into each other — scrolling
+        # keeps every control whole and reachable.
+        from PySide6.QtWidgets import QFrame, QScrollArea
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("FoldScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setWidget(body)
+        lay.addWidget(self.scroll, 1)
 
     def set_summary(self, text: str) -> None:
         """One line of what is happening, for the banner and the strip."""
