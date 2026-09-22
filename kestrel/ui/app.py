@@ -856,7 +856,8 @@ class MainWindow(QWidget):
         # models followed badly; one agent with the whole context does the
         # same work more reliably.
         self._icon_tabs = ["status", "models", "params", "cluster",
-                           "tools", "skills", "memory", "speech", "backend"]
+                           "tools", "skills", "memory", "speech", "backend",
+                           "prompt", "log", "monitor"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -905,10 +906,19 @@ class MainWindow(QWidget):
         left.setMinimumWidth(0)
         self._label_tabs(left)
         self.left_panel = left
-        # A heading naming the panel. The rail is icons, and an icon you have
-        # to hover to identify is a puzzle rather than a label — the tooltip
-        # says what it is, but only to someone who already suspected.
-        splitter.addWidget(self._titled(left, "left"))
+        # The controls drawer. Every tab the window has always had lives here —
+        # Status, Models, Params, Cluster, Tools, Skills, Memory, Speech,
+        # Backend, and the machinery that used to be on the right — so nothing
+        # is lost, it just stops taking space until it is asked for.
+        self.drawer_host = self._titled(left, "left")
+
+        # History on the left: conversations and projects, hidden from ☰.
+        self.history_host = QWidget()
+        history_lay = QVBoxLayout(self.history_host)
+        history_lay.setContentsMargins(0, 0, 0, 0)
+        history_lay.addWidget(self.projects_panel)
+        self.history_host.setMinimumWidth(220)
+        splitter.addWidget(self.history_host)
 
         # centre: transcript and composer
         centre = QWidget()
@@ -1028,9 +1038,34 @@ class MainWindow(QWidget):
         row.addWidget(self.stop_btn)
         row.addWidget(self.send_btn)
         clay.addLayout(row)
-        splitter.addWidget(centre)
 
-        # right: activity and server log
+        # The workspace: chat on the left, panels that fold, tile and step
+        # aside. Canvas and Plan can be switched off from the top bar, which
+        # removes them rather than leaving an empty panel to say so.
+        from .workspace import FoldPanel, Workspace
+        self.workspace = Workspace(centre)
+        self.canvas_panel_widget = CanvasPanel(self.cfg)
+        self._wire_canvas(self.canvas_panel_widget)
+        self.plan_panel = PlanPanel()
+        self.fold_canvas = FoldPanel("canvas", "Canvas", self.canvas_panel_widget)
+        self.fold_plan = FoldPanel("plan", "Plan", self.plan_panel)
+        self.fold_activity = FoldPanel("activity", "Activity", self.activity)
+        for panel in (self.fold_canvas, self.fold_plan, self.fold_activity):
+            self.workspace.add_panel(panel)
+        self.workspace.set_feature("canvas", bool(self.cfg.canvas_forced))
+        self.workspace.set_feature("plan", bool(self.cfg.todo_enabled))
+        splitter.addWidget(self.workspace)
+
+        # The machinery that used to have its own column joins the drawer.
+        for widget, label in (
+                (self._lazy(lambda: PromptPanel(self.cfg), self._wire_prompt),
+                 "Prompt"),
+                (self.log, "Server log"),
+                (self._lazy(SystemPanel, self._wire_system), "System")):
+            left.addTab(widget, label)
+        self._label_tabs(left)
+
+        # right: retained only as a name other code still reaches for
         right = QTabWidget()
         # The right column is what the work produces: the project it belongs
         # to, the code being written, the plan, and the machinery underneath.
@@ -1038,22 +1073,12 @@ class MainWindow(QWidget):
                             "log", "monitor"]
         right.setTabBar(IconTabBar(self._right_tabs))
         right.setTabPosition(QTabWidget.East)
-        right.addTab(self.projects_panel, "Projects")
-        right.addTab(self._lazy(lambda: CanvasPanel(self.cfg), self._wire_canvas),
-                     "Canvas")
-        self.plan_panel = PlanPanel()
-        right.addTab(self.plan_panel, "Plan")
-        right.addTab(self._lazy(lambda: PromptPanel(self.cfg), self._wire_prompt),
-                     "Prompt")
-        right.addTab(self.activity, "Activity")
-        right.addTab(self.log, "Server log")
-        right.addTab(self._lazy(SystemPanel, self._wire_system), "System")
         right.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         right.setMinimumWidth(0)
         self._label_tabs(right, self._right_tabs)
         self.right_panel = right
 
-        splitter.addWidget(self._titled(right, "right"))
+        splitter.addWidget(self.drawer_host)
 
         # Left, centre, right — and therefore exactly two handles. The 1px
         # spacers that used to sit between them gave the splitter five children
@@ -1066,8 +1091,17 @@ class MainWindow(QWidget):
         splitter.setHandleWidth(10)
         splitter.setSizes([340, 620, 300])
         self.splitter = splitter
-        self._panel_widths = {"left": 360, "right": 300}
-        self._collapsed = {"left": False, "right": False}
+        # Start as the design does: history open, controls drawer closed.
+        # Created here as well as wherever they were first made: this runs
+        # during the build, before later code would have made them.
+        self._collapsed = getattr(self, "_collapsed", {})
+        self._panel_widths = getattr(self, "_panel_widths", {})
+        self.drawer_host.hide()
+        self._collapsed["left"] = True
+        self._collapsed["right"] = False
+        self._panel_widths = {"left": 380, "right": 250}
+        # Matches what is on screen: the drawer starts closed.
+        self._collapsed = {"left": True, "right": False}
         self._content_mins: dict[int, int] = {}
         splitter.splitterMoved.connect(self._clamp_panels)
         left.currentChanged.connect(lambda _i: self._clamp_panels())
@@ -1124,6 +1158,17 @@ class MainWindow(QWidget):
         lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(8)
 
+        # History: conversations and projects, hidden and shown from here.
+        self.history_btn = QPushButton("☰")
+        self.history_btn.setObjectName("Chip")
+        self.history_btn.setCheckable(True)
+        self.history_btn.setChecked(True)
+        self.history_btn.setFixedWidth(36)
+        self.history_btn.setToolTip("Show or hide conversations and projects")
+        self.history_btn.toggled.connect(
+            lambda on: self._toggle_panel("right", None, on))
+        lay.addWidget(self.history_btn)
+
         mark = QLabel("KESTREL")
         mark.setObjectName("Wordmark")
         lay.addWidget(mark)
@@ -1153,6 +1198,18 @@ class MainWindow(QWidget):
         new_btn.setToolTip("Start a new session")
         new_btn.clicked.connect(self.new_session)
         lay.addWidget(new_btn)
+
+        # The controls drawer: every panel the window has, out of the way until
+        # it is wanted.
+        self.drawer_btn = QPushButton("Controls")
+        self.drawer_btn.setObjectName("Chip")
+        self.drawer_btn.setCheckable(True)
+        self.drawer_btn.setToolTip("Status, models, parameters, cluster, "
+                                   "tools, skills, memory, speech, backend, "
+                                   "prompt, server log and system")
+        self.drawer_btn.toggled.connect(
+            lambda on: self._toggle_panel("left", None, on))
+        lay.addWidget(self.drawer_btn)
 
         settings_btn = QPushButton("Settings")
         settings_btn.setObjectName("Chip")
@@ -1871,34 +1928,32 @@ class MainWindow(QWidget):
             tabs.setTabText(index, "")
 
     def _toggle_panel(self, key: str, panel: QWidget, visible: bool) -> None:
-        """Remember the width on the way out so restoring returns it to where
-        the user had it, rather than to a default."""
+        """Show or hide a side of the window completely.
+
+        "left" is the controls drawer — every tab the window has — and
+        "right" is the conversation history. Both hide outright rather than
+        collapsing to a rail: a side that is not in use should give back all of
+        its width, not keep a strip of icons to say it exists.
+        """
+        host = self.drawer_host if key == "left" else self.history_host
         sizes = self.splitter.sizes()
-        index = 0 if key == "left" else 2
-        centre = 1
-        rail = self._rail_width(panel)
-        if not visible:
-            if sizes[index] > rail + 20:
-                self._panel_widths[key] = sizes[index]
-            # Collapse to exactly the icon rail: the tabs stay reachable, and
-            # the pane border is dropped so no empty sliver shows beside them.
-            self._set_collapsed_style(panel, True)
-            panel.setMinimumWidth(0)     # so it can shrink to the rail
-            sizes[centre] += sizes[index] - rail
-            sizes[index] = rail
-        else:
-            self._set_collapsed_style(panel, False)
-            # A minimum Qt enforces during the drag, rather than a correction
-            # applied after it: clamping in splitterMoved fights the drag and
-            # loses, which is why the floor did not hold.
-            floor = self._content_min(panel)
-            panel.setMinimumWidth(floor)
-            wanted = max(floor, self._panel_widths.get(key, 340))
-            restored = min(wanted, max(floor, sizes[centre] - 240))
-            sizes[index] = restored
-            sizes[centre] = max(240, sizes[centre] - (restored - rail))
-        self.splitter.setSizes(sizes)
+        index = 2 if key == "left" else 0
+        if not visible and sizes[index] > 60:
+            self._panel_widths[key] = sizes[index]
+        host.setVisible(visible)
+        if visible:
+            sizes = self.splitter.sizes()
+            wanted = self._panel_widths.get(key, 380 if key == "left" else 250)
+            sizes[index] = wanted
+            sizes[1] = max(400, sizes[1] - wanted)
+            self.splitter.setSizes(sizes)
         self._collapsed[key] = not visible
+        button = getattr(self, "drawer_btn" if key == "left" else "history_btn",
+                         None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(visible)
+            button.blockSignals(False)
 
     def _titled(self, tabs, key: str):
         """Wrap a tab widget with a heading that follows the current tab."""
@@ -1978,7 +2033,9 @@ class MainWindow(QWidget):
         self._clamp_panels()
 
     def _clamp_panels(self, *_args) -> None:
-        """Keep each expanded panel's minimum in step with what it now holds."""
+        """Nothing to clamp: both sides now hide completely rather than
+        narrowing to a rail, and the drawer keeps its own minimum."""
+        return
         for key, panel in (("left", self.left_panel), ("right", self.right_panel)):
             if not self._collapsed.get(key):
                 panel.setMinimumWidth(self._content_min(panel))
@@ -2252,12 +2309,17 @@ class MainWindow(QWidget):
 
     def _set_canvas_forced(self, on: bool) -> None:
         self.cfg.canvas_forced = bool(on)
+        if getattr(self, "workspace", None) is not None:
+            # Off means gone: an unused canvas should not keep a panel.
+            self.workspace.set_feature("canvas", bool(on))
         self.cfg.save()
         self._status("New files go through the canvas" if on else
                      "write_file may create files directly")
 
     def _set_plan_enabled(self, on: bool) -> None:
         self.cfg.todo_enabled = bool(on)
+        if getattr(self, "workspace", None) is not None:
+            self.workspace.set_feature("plan", bool(on))
         self.cfg.save()
         self.requestPlanEnabled.emit(bool(on))
         self._status("Plan on — work will be broken into steps" if on else

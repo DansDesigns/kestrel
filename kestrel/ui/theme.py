@@ -260,6 +260,20 @@ QLabel#PanelTitle {{
     padding: 7px 12px 5px 12px;
     border-bottom: 1px solid {line};
 }}
+/* Workspace panels: framed like the design, a banner above the body. */
+QWidget#FoldPanel {{
+    background: {panel}; border: 1px solid {line}; border-radius: 12px;
+}}
+QWidget#FoldBanner {{ border-bottom: 1px solid {line}; background: transparent; }}
+QLabel#FoldTitle {{
+    color: {dim}; font-family: "IBM Plex Mono", "JetBrains Mono", Consolas, monospace;
+    letter-spacing: 1px; font-weight: 600;
+}}
+QLabel#FoldDetail {{ color: {amber}; }}
+QToolButton#FoldButton {{
+    border: none; color: {dim}; padding: 2px 6px; border-radius: 6px;
+}}
+QToolButton#FoldButton:hover {{ background: {panel_hi}; color: {text}; }}
 QLabel#BarModel {{
     color: {text}; font-weight: 600; padding: 3px 12px;
     background: {panel_hi}; border: 1px solid {line}; border-radius: 5px;

@@ -1,0 +1,230 @@
+"""The workspace: the chat beside panels that fold, tile and step aside.
+
+Three rules, and every fold or unfold simply re-runs them:
+
+1. The chat holds the left of the workspace and never folds. It is what
+   Kestrel is; everything else is a view onto what it is doing.
+2. Open panels stack top to bottom and share the height equally.
+3. Folded panels become thin vertical strips along the right edge, each still
+   showing its name and a one-line summary — so folding hides the detail, not
+   the progress.
+
+A panel can also be switched off altogether (Canvas and Plan from the top
+bar), which removes it rather than folding it: a feature that is not in use
+should not take a strip of the window to say so.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QSizePolicy, QToolButton,
+                               QVBoxLayout, QWidget)
+
+from . import theme
+
+
+class FoldPanel(QWidget):
+    """A titled section that can be folded to a strip or switched off."""
+
+    folded_changed = Signal(bool)
+
+    def __init__(self, key: str, title: str, body: QWidget, parent=None):
+        super().__init__(parent)
+        self.key = key
+        self.title = title
+        self.body = body
+        self.folded = False
+        self.enabled_ = True
+        self.summary = ""
+
+        self.setObjectName("FoldPanel")
+        # So the stylesheet's background and border actually paint on a
+        # plain QWidget, which otherwise ignores them.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.banner = QWidget()
+        self.banner.setObjectName("FoldBanner")
+        bar = QHBoxLayout(self.banner)
+        bar.setContentsMargins(6, 0, 10, 0)
+        bar.setSpacing(8)
+        self.fold_btn = QToolButton()
+        self.fold_btn.setObjectName("FoldButton")
+        self.fold_btn.setText("▾")
+        self.fold_btn.setToolTip(f"Fold {title.lower()}")
+        self.fold_btn.setAutoRaise(True)
+        self.fold_btn.clicked.connect(lambda: self.set_folded(True))
+        bar.addWidget(self.fold_btn)
+        self.label = QLabel(title.upper())
+        self.label.setObjectName("FoldTitle")
+        bar.addWidget(self.label)
+        bar.addStretch(1)
+        self.detail = QLabel("")
+        self.detail.setObjectName("FoldDetail")
+        bar.addWidget(self.detail)
+        self.banner.setFixedHeight(36)
+        lay.addWidget(self.banner)
+        lay.addWidget(body, 1)
+
+    def set_summary(self, text: str) -> None:
+        """One line of what is happening, for the banner and the strip."""
+        self.summary = " ".join(str(text or "").split())
+        self.detail.setText(self.summary[:60])
+
+    def set_folded(self, folded: bool) -> None:
+        if folded == self.folded:
+            return
+        self.folded = folded
+        self.folded_changed.emit(folded)
+
+    def set_enabled_feature(self, on: bool) -> None:
+        self.enabled_ = bool(on)
+
+
+class Strip(QToolButton):
+    """A folded panel: its name and summary written sideways, one click to open."""
+
+    WIDTH = 40
+
+    def __init__(self, panel: FoldPanel, parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.setObjectName("FoldStrip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"Unfold {panel.title.lower()}")
+        self.setFixedWidth(self.WIDTH)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.clicked.connect(lambda: panel.set_folded(False))
+
+    def sizeHint(self) -> QSize:              # noqa: N802
+        return QSize(self.WIDTH, 200)
+
+    def paintEvent(self, event):              # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        hover = self.underMouse()
+        p.setPen(QColor(theme.LINE))
+        p.setBrush(QColor(theme.PANEL_HI if hover else theme.PANEL))
+        p.drawRoundedRect(rect, 9, 9)
+
+        p.setPen(QColor(theme.TEXT_DIM))
+        font = QFont(self.font())
+        font.setPointSizeF(max(8.0, font.pointSizeF() - 0.5))
+        p.setFont(font)
+        p.drawText(QRectF(0, 8, self.width(), 18), Qt.AlignCenter, "◂")
+
+        # Written downwards, top to bottom, as a spine reads.
+        p.save()
+        p.translate(self.width() / 2 + 5, 34)
+        p.rotate(90)
+        metrics = p.fontMetrics()
+        room = max(40, self.height() - 50)
+        name = self.panel.title.upper()
+        p.setPen(QColor(theme.TEXT_DIM))
+        p.drawText(0, 0, name)
+        summary = self.panel.summary
+        if summary:
+            offset = metrics.horizontalAdvance(name) + 14
+            p.setPen(QColor(theme.AMBER))
+            p.drawText(offset, 0, metrics.elidedText(
+                summary, Qt.ElideRight, int(room - offset)))
+        p.restore()
+        p.end()
+
+
+class Workspace(QWidget):
+    """The chat and its panels, laid out by the three rules above."""
+
+    layout_changed = Signal()
+
+    def __init__(self, chat: QWidget, parent=None):
+        super().__init__(parent)
+        self.chat = chat
+        self.panels: list[FoldPanel] = []
+        self.strips: dict[str, Strip] = {}
+
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(12, 12, 12, 12)
+        self.row.setSpacing(12)
+        # The chat never gets so narrow its composer buttons crush into
+        # fragments: below this the side panels give way first.
+        chat.setMinimumWidth(460)
+        self.row.addWidget(chat, 1)
+
+        self.stack_host = QWidget()
+        self.stack = QVBoxLayout(self.stack_host)
+        self.stack.setContentsMargins(0, 0, 0, 0)
+        self.stack.setSpacing(12)
+        self.row.addWidget(self.stack_host, 1)
+
+        self.strip_host = QWidget()
+        self.strip_row = QHBoxLayout(self.strip_host)
+        self.strip_row.setContentsMargins(0, 0, 0, 0)
+        self.strip_row.setSpacing(8)
+        self.row.addWidget(self.strip_host, 0)
+
+    # -- membership -----------------------------------------------------------
+    def add_panel(self, panel: FoldPanel) -> None:
+        self.panels.append(panel)
+        strip = Strip(panel)
+        self.strips[panel.key] = strip
+        panel.folded_changed.connect(lambda _f: self.relayout())
+        self.relayout()
+
+    def panel(self, key: str) -> FoldPanel | None:
+        return next((p for p in self.panels if p.key == key), None)
+
+    def set_feature(self, key: str, on: bool) -> None:
+        """Switch a panel off entirely, or back on (Canvas and Plan)."""
+        panel = self.panel(key)
+        if panel is None:
+            return
+        panel.set_enabled_feature(on)
+        if on:
+            panel.folded = False       # switching on means wanting to see it
+        self.relayout()
+
+    # -- the rules --------------------------------------------------------------
+    def open_panels(self) -> list[FoldPanel]:
+        return [p for p in self.panels if p.enabled_ and not p.folded]
+
+    def folded_panels(self) -> list[FoldPanel]:
+        return [p for p in self.panels if p.enabled_ and p.folded]
+
+    def relayout(self) -> None:
+        # Take everything out, then put back what the rules say belongs.
+        for p in self.panels:
+            self.stack.removeWidget(p)
+            p.setParent(self.stack_host)
+            p.hide()
+        for strip in self.strips.values():
+            self.strip_row.removeWidget(strip)
+            strip.setParent(self.strip_host)
+            strip.hide()
+
+        opened = self.open_panels()
+        for p in opened:
+            # Equal stretch: the open panels share the height evenly.
+            self.stack.addWidget(p, 1)
+            p.show()
+        self.stack_host.setVisible(bool(opened))
+
+        folded = self.folded_panels()
+        for p in folded:
+            strip = self.strips[p.key]
+            self.strip_row.addWidget(strip)
+            strip.show()
+            strip.update()
+        self.strip_host.setVisible(bool(folded))
+
+        # With no open panel beside it the chat takes the whole row; with some
+        # it shares, giving the panels a little more because code wants width.
+        # The chat keeps a little more than the panels when they share the
+        # row: it is the thing being read.
+        self.row.setStretch(0, 5)
+        self.row.setStretch(1, 4 if opened else 0)
+        self.layout_changed.emit()
