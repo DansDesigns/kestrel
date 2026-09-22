@@ -4,7 +4,11 @@ Three rules, and every fold or unfold simply re-runs them:
 
 1. The chat holds the left of the workspace and never folds. It is what
    Kestrel is; everything else is a view onto what it is doing.
-2. Open panels stack top to bottom and share the height equally.
+2. Open panels stand side by side, each the full height, sharing the width
+   equally. Stacked, three panels each got a third of the height and became
+   squares too short to show a file or a plan; side by side, each keeps the
+   full height and gives up width instead, which code and checklists spare
+   more easily.
 3. Folded panels become thin vertical strips along the right edge, each still
    showing its name and a one-line summary — so folding hides the detail, not
    the progress.
@@ -40,6 +44,9 @@ class FoldPanel(QWidget):
 
         self.setObjectName("FoldPanel")
         self.setMinimumHeight(0)
+        # Narrow enough that three fit beside the chat on a laptop screen,
+        # wide enough that a line of code is still a line.
+        self.setMinimumWidth(300)
         # So the stylesheet's background and border actually paint on a
         # plain QWidget, which otherwise ignores them.
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -167,7 +174,7 @@ class Workspace(QWidget):
         self.row.addWidget(chat, 1)
 
         self.stack_host = QWidget()
-        self.stack = QVBoxLayout(self.stack_host)
+        self.stack = QHBoxLayout(self.stack_host)
         self.stack.setContentsMargins(0, 0, 0, 0)
         self.stack.setSpacing(12)
         self.row.addWidget(self.stack_host, 1)
@@ -219,7 +226,8 @@ class Workspace(QWidget):
 
         opened = self.open_panels()
         for p in opened:
-            # Equal stretch: the open panels share the height evenly.
+            # Equal stretch: the open panels share the width evenly, each at
+            # the full height of the workspace.
             self.stack.addWidget(p, 1)
             p.show()
         self.stack_host.setVisible(bool(opened))
@@ -234,8 +242,9 @@ class Workspace(QWidget):
 
         # With no open panel beside it the chat takes the whole row; with some
         # it shares, giving the panels a little more because code wants width.
-        # The chat keeps a little more than the panels when they share the
-        # row: it is the thing being read.
-        self.row.setStretch(0, 5)
-        self.row.setStretch(1, 4 if opened else 0)
+        # Side by side, the panels need width more than the chat does: a
+        # row of three buttons wants about 300px, and the chat reads fine at
+        # its 460px floor. Two parts to the chat, three to the panels.
+        self.row.setStretch(0, 2)
+        self.row.setStretch(1, 3 if opened else 0)
         self.layout_changed.emit()
