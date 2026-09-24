@@ -57,6 +57,7 @@ class GGUFInfo:
     n_head_kv: int = 0          # fewer than n_head under grouped-query attention
     head_dim: int = 0
     vocab: int = 0
+    n_expert: int = 0              # experts per MoE layer; 0 for a dense model
     n_params: int = 0
     tensor_count: int = 0
     file_size: int = 0
@@ -266,7 +267,8 @@ def read(path: str | Path, want_template: bool = True) -> GGUFInfo:
                       (f"{arch}.attention.head_count", "n_head"),
                       (f"{arch}.attention.head_count_kv", "n_head_kv"),
                       (f"{arch}.attention.key_length", "head_dim"),
-                      (f"{arch}.vocab_size", "vocab")):
+                      (f"{arch}.vocab_size", "vocab"),
+                      (f"{arch}.expert_count", "n_expert")):
         v = kv.get(key)
         if isinstance(v, int):
             setattr(info, attr, v)

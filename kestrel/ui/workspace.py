@@ -51,7 +51,10 @@ class FoldPanel(QWidget):
         # plain QWidget, which otherwise ignores them.
         self.setAttribute(Qt.WA_StyledBackground, True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # A pixel inside the frame, so the body's own background cannot paint
+        # over the rounded border — which is what made neighbouring panels
+        # look as though they touched.
+        lay.setContentsMargins(1, 1, 1, 1)
         lay.setSpacing(0)
 
         self.banner = QWidget()
@@ -86,6 +89,15 @@ class FoldPanel(QWidget):
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setWidget(body)
         lay.addWidget(self.scroll, 1)
+
+    def add_banner_widget(self, widget) -> None:
+        """Put a control in the banner, before the summary."""
+        bar = self.banner.layout()
+        bar.insertWidget(bar.count() - 1, widget)
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+        self.label.setText(title.upper())
 
     def set_summary(self, text: str) -> None:
         """One line of what is happening, for the banner and the strip."""
@@ -176,7 +188,7 @@ class Workspace(QWidget):
         self.stack_host = QWidget()
         self.stack = QHBoxLayout(self.stack_host)
         self.stack.setContentsMargins(0, 0, 0, 0)
-        self.stack.setSpacing(12)
+        self.stack.setSpacing(14)
         self.row.addWidget(self.stack_host, 1)
 
         self.strip_host = QWidget()

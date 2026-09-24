@@ -859,7 +859,7 @@ class MainWindow(QWidget):
         # same work more reliably.
         self._icon_tabs = ["status", "models", "params", "cluster",
                            "tools", "skills", "memory", "speech", "backend",
-                           "prompt", "log", "monitor"]
+                           "prompt", "monitor"]
         # Order matters: the shape is applied to whichever bar is installed, so
         # the custom bar has to be in place before the position is set.
         left.setTabBar(IconTabBar(self._icon_tabs))
@@ -1051,7 +1051,21 @@ class MainWindow(QWidget):
         self.plan_panel = PlanPanel()
         self.fold_canvas = FoldPanel("canvas", "Canvas", self.canvas_panel_widget)
         self.fold_plan = FoldPanel("plan", "Plan", self.plan_panel)
-        self.fold_activity = FoldPanel("activity", "Activity", self.activity)
+        # Activity and the server log share one panel, switched from its
+        # banner: both answer "what is happening", one from Kestrel's side and
+        # one from llama-server's.
+        from PySide6.QtWidgets import QStackedWidget
+        self.activity_stack = QStackedWidget()
+        self.activity_stack.addWidget(self.activity)
+        self.activity_stack.addWidget(self.log)
+        self.fold_activity = FoldPanel("activity", "Activity", self.activity_stack)
+        self.log_switch = QPushButton("Server log")
+        self.log_switch.setObjectName("Chip")
+        self.log_switch.setCheckable(True)
+        self.log_switch.setToolTip("Swap between Kestrel's activity and "
+                                   "llama-server's own log")
+        self.log_switch.toggled.connect(self._show_server_log)
+        self.fold_activity.add_banner_widget(self.log_switch)
         for panel in (self.fold_canvas, self.fold_plan, self.fold_activity):
             self.workspace.add_panel(panel)
         self.workspace.set_feature("canvas", bool(self.cfg.canvas_forced))
@@ -1062,7 +1076,6 @@ class MainWindow(QWidget):
         for widget, label in (
                 (self._lazy(lambda: PromptPanel(self.cfg), self._wire_prompt),
                  "Prompt"),
-                (self.log, "Server log"),
                 (self._lazy(SystemPanel, self._wire_system), "System")):
             left.addTab(widget, label)
         self._label_tabs(left)
@@ -2298,6 +2311,15 @@ class MainWindow(QWidget):
             if self._bottom_folded else "")
         self.cfg.bottom_folded = self._bottom_folded
         self.cfg.save()
+
+    def _show_server_log(self, on: bool) -> None:
+        """Swap the activity panel between Kestrel's steps and the server log."""
+        self.activity_stack.setCurrentIndex(1 if on else 0)
+        self.fold_activity.set_title("Server log" if on else "Activity")
+        self.log_switch.setText("Activity" if on else "Server log")
+        if on:
+            bar = self.log.verticalScrollBar()
+            bar.setValue(bar.maximum())
 
     def _paint_history_icon(self) -> None:
         on = self.history_btn.isChecked()

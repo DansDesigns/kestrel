@@ -327,6 +327,33 @@ UNIFIED_NAMES = {"llama", "llama.exe"}
 LAST_CAP: list = []
 
 
+def moe_split(cfg, model_path: str = "") -> int | None:
+    """For a mixture-of-experts model too big for VRAM: how many layers'
+    experts to leave in system RAM, or None when this does not apply.
+
+    VRAM is filled first either way. The difference is what spills: a dense
+    model can only spill whole layers, which then run on the CPU; an MoE model
+    can spill just its experts — most of its size, and only a few of them run
+    per token — so everything else stays on the GPU and the GPU works on every
+    token.
+    """
+    from . import gguf
+
+    path = model_path or cfg.model_path
+    if not path:
+        return None
+    try:
+        info = gguf.read(path, want_template=False)
+    except Exception:
+        return None
+    if not info.n_expert or not info.n_layer:
+        return None
+    fits = resolve_gpu_layers(cfg, path)
+    if fits >= info.n_layer or fits <= 0:
+        return None
+    return max(1, info.n_layer - fits)
+
+
 def cap_gpu_layers(cfg, model_path: str = "") -> tuple[int, str]:
     """Trim a hand-set layer count that leaves the driver no room.
 
@@ -460,7 +487,14 @@ def build_command(cfg, model_path: str = "", rpc: str = "",
     rt = cfg.runtime
     cmd = server_argv(binary) + ["--host", rt.host, "--port", str(rt.port)]
     if with_model:
-        if rt.n_gpu_layers < 0:
+        split = moe_split(cfg, model_path) if rt.n_gpu_layers < 0 else None
+        if split is not None:
+            # Every layer on the GPU, with only the experts of some layers
+            # left in system RAM. Attention and the shared weights then run
+            # on the GPU for every token, which a plain layer split cannot
+            # do: a layer left on the CPU runs entirely on the CPU.
+            cmd += ["-ngl", "999", "--n-cpu-moe", str(split)]
+        elif rt.n_gpu_layers < 0:
             cmd += ["-ngl", str(resolve_gpu_layers(cfg, model_path))]
         else:
             # A hand-set count is respected unless it cannot work: filling the
