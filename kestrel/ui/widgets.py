@@ -1946,8 +1946,11 @@ class ChatTabs(QWidget):
         lay.addWidget(self.stack, 1)
 
         self.add_btn = QPushButton("+")
-        self.add_btn.setObjectName("Chip")
-        self.add_btn.setFixedSize(28, 22)
+        self.add_btn.setObjectName("TabAdd")
+        self.add_btn.setFixedSize(30, 20)
+        # The chip style's own minimum height made it 30px in a 32px row, so
+        # it sat low against the chat's edge. Sized to the row, it centres.
+
         self.add_btn.setToolTip("New conversation on the same model")
         self.add_btn.clicked.connect(lambda: self.added.emit())
         self.bar.setParent(self.bar.parent())

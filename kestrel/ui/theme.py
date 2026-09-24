@@ -261,6 +261,17 @@ QLabel#PanelTitle {{
     padding: 7px 12px 5px 12px;
     border-bottom: 1px solid {line};
 }}
+/* The new-conversation button: a small round chip sized to its thin row,
+   where the ordinary chip's minimum height would push it off centre. */
+QPushButton#TabAdd {{
+    min-height: 0; padding: 0; margin: 0;
+    background: {panel_hi}; color: {text};
+    /* No more than half the height: Qt draws a larger radius as no radius
+       at all, which is why this was square. */
+    border: 1px solid {line}; border-radius: 9px;
+}}
+QPushButton#TabAdd:hover {{ border-color: {amber}; color: {amber}; }}
+
 /* Top bar: presets as one segmented control, switches as pills. */
 QWidget#Segment {{
     background: {panel}; border: 1px solid {line}; border-radius: 8px;
@@ -286,6 +297,9 @@ QPushButton#TopToggle:checked {{
 /* Workspace panels: framed like the design, a banner above the body. */
 QWidget#FoldPanel {{
     background: {panel}; border: 1px solid {line}; border-radius: 12px;
+    /* Matches workspace.GAP: the frame sits inset, so neighbours always show
+       a gap between them however tight the window. */
+    margin: 0 6px;
 }}
 QWidget#FoldBanner {{ border-bottom: 1px solid {line}; background: {panel};
     border-top-left-radius: 12px; border-top-right-radius: 12px; }}

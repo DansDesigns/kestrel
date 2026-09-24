@@ -1115,6 +1115,10 @@ class MainWindow(QWidget):
         self._collapsed["left"] = True
         self._collapsed["right"] = False
         self._populate_top_controls()
+        self._bar_timer = QTimer(self)
+        self._bar_timer.setInterval(300)
+        self._bar_timer.timeout.connect(self._refresh_bar)
+        self._bar_timer.start()
         self._panel_widths = {"left": 380, "right": 250}
         # Matches what is on screen: the drawer starts closed.
         self._collapsed = {"left": True, "right": False}
@@ -2283,6 +2287,8 @@ class MainWindow(QWidget):
         """Put the loaded model's name in the bar, and its path in the tooltip."""
         name = Path(path).name if path else ""
         self.bar_model.setText(name or "no model loaded…")
+        if name:
+            self._just_loaded = (name, time.monotonic())
         self.bar_model.setToolTip(str(path) or "The model currently loaded")
 
     def _tick_bottom(self) -> None:
@@ -2311,6 +2317,28 @@ class MainWindow(QWidget):
             if self._bottom_folded else "")
         self.cfg.bottom_folded = self._bottom_folded
         self.cfg.save()
+
+    def _refresh_bar(self) -> None:
+        """What the bar shows, in order of what matters now.
+
+        1. What the model is doing, while it is doing it — reading the prompt,
+           thinking, replying.
+        2. The model just loaded, for a few seconds after it loads.
+        3. Otherwise, the generation rate from the last reply.
+        """
+        text = ""
+        typing = getattr(self, "typing", None)
+        if typing is not None and typing.isVisible():
+            text = f"Kestrel is {typing._label}"
+        else:
+            name, when = getattr(self, "_just_loaded", ("", 0.0))
+            if name and time.monotonic() - when < 8:
+                text = f"Loaded {name}"
+            else:
+                rate = self.rate_label.text() if hasattr(self, "rate_label") else ""
+                text = rate or ""
+        if self.bar_status.text() != text:
+            self.bar_status.setText(text)
 
     def _show_server_log(self, on: bool) -> None:
         """Swap the activity panel between Kestrel's steps and the server log."""
@@ -2716,8 +2744,15 @@ class MainWindow(QWidget):
 
     @Slot(str)
     def _status(self, message: str) -> None:
+        """A passing message: to the log and the Status tab, not the bar.
+
+        The bar is kept for three things only (see _refresh_bar). Everything
+        else still lands in the server log, and the latest is on the bar's
+        tooltip, so a message is never lost — it just stops crowding the one
+        line meant to be read at a glance.
+        """
         self.status_msg.setText(message)
-        self.bar_status.setText(message)
+        self.bar_status.setToolTip(message)
         self.log.appendPlainText("[ui] " + message)
 
     PROFILE_KEYS = ("ctx_size", "n_gpu_layers", "batch_size", "ubatch_size",

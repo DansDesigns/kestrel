@@ -1278,11 +1278,6 @@ class PlanPanel(QWidget):
         self.hint.setObjectName("Dim")
         lay.addWidget(self.hint)
 
-        note = QLabel("Re-sent with every prompt, so it survives compaction.")
-        note.setWordWrap(True)
-        note.setObjectName("Dim")
-        lay.addWidget(note)
-
     def set_running(self, running: bool) -> None:
         self._running = running
         self._refresh_hint()

@@ -28,10 +28,16 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QSizePolicy, QToolButton,
 from . import theme
 
 
+# Half the visible gap between two panels; each panel keeps this much clear
+# on either side of its frame.
+GAP = 6
+
+
 class FoldPanel(QWidget):
     """A titled section that can be folded to a strip or switched off."""
 
     folded_changed = Signal(bool)
+    MIN_WIDTH = 300
 
     def __init__(self, key: str, title: str, body: QWidget, parent=None):
         super().__init__(parent)
@@ -39,6 +45,9 @@ class FoldPanel(QWidget):
         self.title = title
         self.body = body
         self.folded = False
+        # Folded by the workspace for lack of room, not by the person. Only
+        # these come back on their own when the window widens.
+        self.auto_folded = False
         self.enabled_ = True
         self.summary = ""
 
@@ -46,15 +55,18 @@ class FoldPanel(QWidget):
         self.setMinimumHeight(0)
         # Narrow enough that three fit beside the chat on a laptop screen,
         # wide enough that a line of code is still a line.
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(self.MIN_WIDTH)
         # So the stylesheet's background and border actually paint on a
         # plain QWidget, which otherwise ignores them.
         self.setAttribute(Qt.WA_StyledBackground, True)
         lay = QVBoxLayout(self)
-        # A pixel inside the frame, so the body's own background cannot paint
-        # over the rounded border — which is what made neighbouring panels
-        # look as though they touched.
-        lay.setContentsMargins(1, 1, 1, 1)
+        # The gap between panels is drawn by each panel, not left to the
+        # layout's spacing. When the window is narrower than everything's
+        # minimum — Windows display scaling makes a 1920px screen 1536 wide
+        # to Qt at 125% — a layout gives up its spacing first, and the panels
+        # closed up against each other. A margin inside each panel cannot be
+        # squeezed away. The stylesheet insets the frame by the same amount.
+        lay.setContentsMargins(GAP + 1, 1, GAP + 1, 1)
         lay.setSpacing(0)
 
         self.banner = QWidget()
@@ -108,6 +120,7 @@ class FoldPanel(QWidget):
         if folded == self.folded:
             return
         self.folded = folded
+        self.auto_folded = False         # a person's choice overrides the fit
         self.folded_changed.emit(folded)
 
     def set_enabled_feature(self, on: bool) -> None:
@@ -182,13 +195,16 @@ class Workspace(QWidget):
         self.row.setSpacing(12)
         # The chat never gets so narrow its composer buttons crush into
         # fragments: below this the side panels give way first.
-        chat.setMinimumWidth(460)
+        # Wide enough for the composer's whole button row — Following,
+        # Continue, Speak, Dictate, Stop, Send — at their natural size. At
+        # 460 they shrank and cut their own labels to "ollowin".
+        chat.setMinimumWidth(560)
         self.row.addWidget(chat, 1)
 
         self.stack_host = QWidget()
         self.stack = QHBoxLayout(self.stack_host)
         self.stack.setContentsMargins(0, 0, 0, 0)
-        self.stack.setSpacing(14)
+        self.stack.setSpacing(2)
         self.row.addWidget(self.stack_host, 1)
 
         self.strip_host = QWidget()
@@ -218,6 +234,53 @@ class Workspace(QWidget):
             panel.folded = False       # switching on means wanting to see it
         self.relayout()
 
+    # -- room ----------------------------------------------------------------
+    def _needed(self, open_count: int, folded_count: int) -> int:
+        """Width the workspace needs for this many open and folded panels."""
+        margins = self.row.contentsMargins()
+        need = margins.left() + margins.right() + self.chat.minimumWidth()
+        if open_count:
+            need += self.row.spacing() + open_count * FoldPanel.MIN_WIDTH \
+                + (open_count - 1) * self.stack.spacing()
+        if folded_count:
+            need += self.row.spacing() + folded_count * Strip.WIDTH \
+                + (folded_count - 1) * self.strip_row.spacing()
+        return need
+
+    def _fit(self) -> bool:
+        """Fold the rightmost panel while there is not room, and unfold what
+        was folded for lack of room once there is. Returns True on a change.
+
+        Without this, a window narrower than everything's minimum — which
+        Windows display scaling makes of an ordinary screen — squeezed the
+        panels until they overlapped.
+        """
+        width = self.width()
+        changed = False
+        while True:
+            opened = self.open_panels()
+            folded = self.folded_panels()
+            if len(opened) and self._needed(len(opened), len(folded)) > width:
+                victim = opened[-1]
+                victim.folded = True
+                victim.auto_folded = True
+                changed = True
+                continue
+            waiting = [p for p in folded if p.auto_folded]
+            if waiting:
+                candidate = waiting[0]
+                if self._needed(len(opened) + 1, len(folded) - 1) <= width:
+                    candidate.folded = False
+                    candidate.auto_folded = False
+                    changed = True
+                    continue
+            return changed
+
+    def resizeEvent(self, event):          # noqa: N802
+        super().resizeEvent(event)
+        if self._fit():
+            self._place()
+
     # -- the rules --------------------------------------------------------------
     def open_panels(self) -> list[FoldPanel]:
         return [p for p in self.panels if p.enabled_ and not p.folded]
@@ -226,6 +289,10 @@ class Workspace(QWidget):
         return [p for p in self.panels if p.enabled_ and p.folded]
 
     def relayout(self) -> None:
+        self._fit()
+        self._place()
+
+    def _place(self) -> None:
         # Take everything out, then put back what the rules say belongs.
         for p in self.panels:
             self.stack.removeWidget(p)
