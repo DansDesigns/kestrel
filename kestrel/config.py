@@ -141,6 +141,8 @@ class Config:
     canvas_enabled: bool = True       # give the model the shared code canvas
     canvas_forced: bool = True        # refuse write_file for new code files
     team_enabled: bool = False        # retired: Kestrel is one agent
+    interface: str = "classic"        # classic | office
+    characters_dir: str = ""          # blank means <config>/characters
     minimal_prompt: bool = False      # strip everything optional, for diagnosis
     plan_pointer_only: bool = True    # send a summary, not the whole checklist
     system_prompt_override: str = ""  # replaces the assembled prompt entirely
@@ -277,3 +279,60 @@ def default_skill_dirs() -> list[str]:
         Path.cwd() / ".claude" / "skills",
     ]
     return [str(c) for c in candidates]
+
+
+CHARACTER_FORMATS = (".glb", ".gltf", ".fbx", ".obj", ".dae", ".3ds", ".blend",
+                     ".ply", ".stl")
+
+CHARACTERS_README = """Kestrel characters
+==================
+
+Put a character model here and name it in a persona file with a line like
+
+    model: my-character.glb
+
+Formats Kestrel can load
+  .glb .gltf   best: one file, textures and animations included
+  .fbx         what Mixamo and most stores give you
+  .obj .dae .3ds .ply .stl   static models: they move about but do not animate
+
+Not loadable (proprietary to their programs)
+  .max (3ds Max)   .c4d (Cinema 4D)   .ma / .mb (Maya)
+  Open them in Blender, or export from the program they came from, as .glb
+  or .fbx. Blender is free and reads almost everything.
+
+For a character that walks, sits and types
+  1. Find a character in a T-pose (cgtrader, Sketchfab, Meshy, Mixamo).
+  2. Upload it to mixamo.com, which rigs it automatically.
+  3. Download animations named Idle, Walking, Sitting and Typing, "With Skin".
+  4. Put them in a folder here named after the character:
+       characters/ranger/ranger.fbx      the character
+       characters/ranger/Walking.fbx     and its animations
+       characters/ranger/Typing.fbx
+  Kestrel matches animations to what it is doing by their file names.
+
+Check each model's licence: free in a store does not always mean free to use.
+"""
+
+
+def characters_path(cfg) -> Path:
+    """Where character models live, made on first use with its README."""
+    folder = Path(cfg.characters_dir).expanduser() if cfg.characters_dir \
+        else Path(cfg.path).expanduser().parent / "characters"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        readme = folder / "README.txt"
+        if not readme.exists():
+            readme.write_text(CHARACTERS_README, "utf-8")
+    except OSError:
+        pass
+    return folder
+
+
+def list_characters(cfg) -> list[Path]:
+    folder = characters_path(cfg)
+    try:
+        return sorted(p for p in folder.rglob("*")
+                      if p.suffix.lower() in CHARACTER_FORMATS)
+    except OSError:
+        return []

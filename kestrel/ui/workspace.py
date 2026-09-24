@@ -39,8 +39,21 @@ class FoldPanel(QWidget):
     folded_changed = Signal(bool)
     MIN_WIDTH = 300
 
-    def __init__(self, key: str, title: str, body: QWidget, parent=None):
+    _clock = 0
+
+    @classmethod
+    def _tick(cls) -> int:
+        cls._clock += 1
+        return cls._clock
+
+    def __init__(self, key: str, title: str, body: QWidget, parent=None,
+                 min_width: int = 0):
         super().__init__(parent)
+        # When it was last opened. The fit folds the longest-open panel first,
+        # never the one just asked for: folding the rightmost instead folded
+        # whatever had just been clicked open, which then refused to open.
+        self.opened_at = self._tick()
+        self.min_width = min_width or self.MIN_WIDTH
         self.key = key
         self.title = title
         self.body = body
@@ -55,7 +68,7 @@ class FoldPanel(QWidget):
         self.setMinimumHeight(0)
         # Narrow enough that three fit beside the chat on a laptop screen,
         # wide enough that a line of code is still a line.
-        self.setMinimumWidth(self.MIN_WIDTH)
+        self.setMinimumWidth(self.min_width)
         # So the stylesheet's background and border actually paint on a
         # plain QWidget, which otherwise ignores them.
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -121,6 +134,8 @@ class FoldPanel(QWidget):
             return
         self.folded = folded
         self.auto_folded = False         # a person's choice overrides the fit
+        if not folded:
+            self.opened_at = self._tick()
         self.folded_changed.emit(folded)
 
     def set_enabled_feature(self, on: bool) -> None:
@@ -221,6 +236,24 @@ class Workspace(QWidget):
         panel.folded_changed.connect(lambda _f: self.relayout())
         self.relayout()
 
+    def set_office(self, office: QWidget | None) -> None:
+        """The 3D office, shown instead of the panels in Office mode."""
+        self.office = office
+        if office is not None:
+            office.hide()
+            self.row.addWidget(office, 3)
+
+    def set_mode(self, mode: str) -> None:
+        """Classic: the panels. Office: the room, with the chat beside it."""
+        self.mode = mode
+        office = getattr(self, "office", None)
+        in_office = mode == "office" and office is not None
+        if office is not None:
+            office.setVisible(in_office)
+        self.stack_host.setVisible(not in_office and bool(self.open_panels()))
+        self.strip_host.setVisible(not in_office and bool(self.folded_panels()))
+        self.row.setStretch(0, 2)
+
     def panel(self, key: str) -> FoldPanel | None:
         return next((p for p in self.panels if p.key == key), None)
 
@@ -232,16 +265,18 @@ class Workspace(QWidget):
         panel.set_enabled_feature(on)
         if on:
             panel.folded = False       # switching on means wanting to see it
+            panel.auto_folded = False
+            panel.opened_at = FoldPanel._tick()
         self.relayout()
 
     # -- room ----------------------------------------------------------------
-    def _needed(self, open_count: int, folded_count: int) -> int:
-        """Width the workspace needs for this many open and folded panels."""
+    def _needed(self, opened: list, folded_count: int) -> int:
+        """Width the workspace needs for these open panels and strips."""
         margins = self.row.contentsMargins()
         need = margins.left() + margins.right() + self.chat.minimumWidth()
-        if open_count:
-            need += self.row.spacing() + open_count * FoldPanel.MIN_WIDTH \
-                + (open_count - 1) * self.stack.spacing()
+        if opened:
+            need += self.row.spacing() + sum(p.min_width for p in opened) \
+                + (len(opened) - 1) * self.stack.spacing()
         if folded_count:
             need += self.row.spacing() + folded_count * Strip.WIDTH \
                 + (folded_count - 1) * self.strip_row.spacing()
@@ -260,8 +295,9 @@ class Workspace(QWidget):
         while True:
             opened = self.open_panels()
             folded = self.folded_panels()
-            if len(opened) and self._needed(len(opened), len(folded)) > width:
-                victim = opened[-1]
+            if opened and self._needed(opened, len(folded)) > width:
+                # The one open longest gives way; the newest is kept.
+                victim = min(opened, key=lambda p: p.opened_at)
                 victim.folded = True
                 victim.auto_folded = True
                 changed = True
@@ -269,7 +305,7 @@ class Workspace(QWidget):
             waiting = [p for p in folded if p.auto_folded]
             if waiting:
                 candidate = waiting[0]
-                if self._needed(len(opened) + 1, len(folded) - 1) <= width:
+                if self._needed(opened + [candidate], len(folded) - 1) <= width:
                     candidate.folded = False
                     candidate.auto_folded = False
                     changed = True
@@ -293,6 +329,8 @@ class Workspace(QWidget):
         self._place()
 
     def _place(self) -> None:
+        if getattr(self, "mode", "classic") == "office":
+            return                       # the room stands in for the panels
         # Take everything out, then put back what the rules say belongs.
         for p in self.panels:
             self.stack.removeWidget(p)

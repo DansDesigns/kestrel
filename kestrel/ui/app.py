@@ -912,7 +912,7 @@ class MainWindow(QWidget):
         # Status, Models, Params, Cluster, Tools, Skills, Memory, Speech,
         # Backend, and the machinery that used to be on the right — so nothing
         # is lost, it just stops taking space until it is asked for.
-        self.drawer_host = self._titled(left, "left")
+        self._controls_tabs = left
 
         # History on the left: conversations and projects, hidden from ☰.
         self.history_host = QWidget()
@@ -1066,8 +1066,23 @@ class MainWindow(QWidget):
                                    "llama-server's own log")
         self.log_switch.toggled.connect(self._show_server_log)
         self.fold_activity.add_banner_widget(self.log_switch)
-        for panel in (self.fold_canvas, self.fold_plan, self.fold_activity):
+        # Controls: every tab the window has — Status, Models, Params,
+        # Cluster, Tools, Skills, Memory, Speech, Backend, Prompt, System — as
+        # one more panel. It folds, tiles and gives way like the others, and
+        # is off until asked for.
+        self.fold_controls = FoldPanel("controls", "Controls",
+                                       self._controls_tabs, min_width=420)
+        self._controls_tabs.currentChanged.connect(self._title_controls)
+        for panel in (self.fold_canvas, self.fold_plan, self.fold_activity,
+                      self.fold_controls):
             self.workspace.add_panel(panel)
+        self.workspace.set_feature("controls", False)
+
+        # The office: Kestrel at work, driven by what the agent is doing.
+        from .office import Look, OfficeView
+        self.office = OfficeView()
+        self.office.set_look(self._persona_look(Look))
+        self.workspace.set_office(self.office)
         self.workspace.set_feature("canvas", bool(self.cfg.canvas_forced))
         self.workspace.set_feature("plan", bool(self.cfg.todo_enabled))
         splitter.addWidget(self.workspace)
@@ -1093,7 +1108,7 @@ class MainWindow(QWidget):
         self._label_tabs(right, self._right_tabs)
         self.right_panel = right
 
-        splitter.addWidget(self.drawer_host)
+        # (Controls is a workspace panel now, not a third column.)
 
         # Left, centre, right — and therefore exactly two handles. The 1px
         # spacers that used to sit between them gave the splitter five children
@@ -1111,10 +1126,10 @@ class MainWindow(QWidget):
         # during the build, before later code would have made them.
         self._collapsed = getattr(self, "_collapsed", {})
         self._panel_widths = getattr(self, "_panel_widths", {})
-        self.drawer_host.hide()
         self._collapsed["left"] = True
         self._collapsed["right"] = False
         self._populate_top_controls()
+        self._set_interface(self.cfg.interface == "office", save=False)
         self._bar_timer = QTimer(self)
         self._bar_timer.setInterval(300)
         self._bar_timer.timeout.connect(self._refresh_bar)
@@ -1975,18 +1990,23 @@ class MainWindow(QWidget):
         collapsing to a rail: a side that is not in use should give back all of
         its width, not keep a strip of icons to say it exists.
         """
-        host = self.drawer_host if key == "left" else self.history_host
-        sizes = self.splitter.sizes()
-        index = 2 if key == "left" else 0
-        if not visible and sizes[index] > 60:
-            self._panel_widths[key] = sizes[index]
-        host.setVisible(visible)
-        if visible:
+        if key == "left":
+            # Controls is a workspace panel: showing it switches the panel on
+            # and unfolds it; hiding it takes it away entirely.
+            self.workspace.set_feature("controls", visible)
+            if visible:
+                self._title_controls()
+        else:
             sizes = self.splitter.sizes()
-            wanted = self._panel_widths.get(key, 380 if key == "left" else 250)
-            sizes[index] = wanted
-            sizes[1] = max(400, sizes[1] - wanted)
-            self.splitter.setSizes(sizes)
+            if not visible and sizes[0] > 60:
+                self._panel_widths[key] = sizes[0]
+            self.history_host.setVisible(visible)
+            if visible:
+                sizes = self.splitter.sizes()
+                wanted = self._panel_widths.get(key, 250)
+                sizes[0] = wanted
+                sizes[1] = max(400, sizes[1] - wanted)
+                self.splitter.setSizes(sizes)
         self._collapsed[key] = not visible
         button = getattr(self, "drawer_btn" if key == "left" else "history_btn",
                          None)
@@ -1994,6 +2014,13 @@ class MainWindow(QWidget):
             button.blockSignals(True)
             button.setChecked(visible)
             button.blockSignals(False)
+
+    def _title_controls(self, *_args) -> None:
+        """The Controls banner names the tab showing: Controls · Models."""
+        tabs = self._controls_tabs
+        index = tabs.currentIndex()
+        name = tabs.tabToolTip(index) or tabs.tabText(index)
+        self.fold_controls.set_title(f"Controls · {name}" if name else "Controls")
 
     def _titled(self, tabs, key: str):
         """Wrap a tab widget with a heading that follows the current tab."""
@@ -2318,6 +2345,25 @@ class MainWindow(QWidget):
         self.cfg.bottom_folded = self._bottom_folded
         self.cfg.save()
 
+    def _set_interface(self, office: bool, save: bool = True) -> None:
+        self.cfg.interface = "office" if office else "classic"
+        if save:
+            self.cfg.save()
+        self.workspace.set_mode(self.cfg.interface)
+        if not office:
+            self.workspace.relayout()
+
+    def _persona_look(self, Look):
+        """The character's look, from the persona in use."""
+        path = getattr(self.cfg, "persona_file", "") or ""
+        text = ""
+        try:
+            if path and Path(path).is_file():
+                text = Path(path).read_text("utf-8", errors="replace")
+        except OSError:
+            pass
+        return Look.for_persona(Path(path).stem if path else "Kestrel", text)
+
     def _refresh_bar(self) -> None:
         """What the bar shows, in order of what matters now.
 
@@ -2330,6 +2376,13 @@ class MainWindow(QWidget):
         typing = getattr(self, "typing", None)
         if typing is not None and typing.isVisible():
             text = f"Kestrel is {typing._label}"
+            office = getattr(self, "office", None)
+            if office is not None and office.isVisible():
+                label = typing._label.lower()
+                if "think" in label or "reason" in label or "prompt" in label:
+                    office.on_thinking()
+                elif "repl" in label or "writ" in label:
+                    office.on_replying()
         else:
             name, when = getattr(self, "_just_loaded", ("", 0.0))
             if name and time.monotonic() - when < 8:
@@ -2367,7 +2420,12 @@ class MainWindow(QWidget):
                 button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                 row.addWidget(button)
         self._top_controls.addWidget(segment)
-        for box in (self.think_box, self.plan_box, self.canvas_box, self.tts_box):
+        self.office_box = _toggle("Office")
+        self.office_box.setToolTip("The 3D office, or the classic panels")
+        self.office_box.setChecked(self.cfg.interface == "office")
+        self.office_box.toggled.connect(self._set_interface)
+        for box in (self.think_box, self.plan_box, self.canvas_box, self.tts_box,
+                    self.office_box):
             box.setObjectName("TopToggle")
             box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             box.style().unpolish(box)
@@ -2534,6 +2592,9 @@ class MainWindow(QWidget):
         self.worker.toolCall.connect(self.on_tool_call)
         self.worker.toolResult.connect(self.on_tool_result)
         self.worker.assistantDone.connect(self.on_assistant)
+        # The office sees what the Activity panel sees.
+        self.worker.toolCall.connect(lambda name, _args: self.office.on_tool(name))
+        self.worker.assistantDone.connect(lambda text: self.office.on_done(text))
         self.worker.contextUpdate.connect(self.gauge.update_usage)
         self.worker.genStats.connect(self.on_gen)
         self.worker.stepped.connect(lambda s, m: self.r_step.set(f"{s}/{m}"))
